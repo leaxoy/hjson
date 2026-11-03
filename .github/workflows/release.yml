@@ -143,27 +143,24 @@ jobs:
 
       - name: Install the MSVC ARM64 toolset
         shell: pwsh
-        # modify acts on an instance, and vswhere is what reports its path — the
-        # Installer folder holding vs_installer.exe is not an instance itself,
-        # which is why the unqualified call exited 1 in six seconds. Requiring
-        # the x64 VC tools selects the image's C++ installation rather than,
-        # say, a workload-less BuildTools copy.
+        # vs_installer modify is addressed by channel + product id; --installPath
+        # belongs to setup.exe, and passing it returned 87 (invalid parameter).
+        # vswhere reports both, which also keeps this working as the image moves
+        # on — it is already past 2022, onto Visual Studio 18.
         #
-        # Start-Process rather than & because the previous attempt reported a
-        # blank exit code: -Wait -PassThru gives a real ExitCode, and the
-        # installer is quiet so the log tail is the only evidence left behind.
+        # Start-Process -Wait -PassThru because plain invocation left $LASTEXITCODE
+        # unset, and the installer is quiet so its log is the only evidence.
         run: |
           $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          "installer: $installer exists=$(Test-Path $installer)"
-          "vswhere: $vswhere exists=$(Test-Path $vswhere)"
-          & $vswhere -all -products * -format json | Write-Output
-          $path = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath | Select-Object -First 1
-          if (-not $path) { throw 'no Visual Studio C++ instance on this image' }
-          "instance: $path"
-          $modify = @('modify', '--installPath', $path,
+          $inst = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+          if (-not $inst) { & $vswhere -all -products * -format json | Write-Output; throw 'no C++ instance found' }
+          "instance: $($inst.installationPath) channel: $($inst.installedChannelId) product: $($inst.installedProductId)"
+          $arm64 = Join-Path $inst.installationPath 'VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe'
+          if (Get-Item $arm64 -ErrorAction SilentlyContinue) { 'arm64 toolset already installed'; exit 0 }
+          $modify = @('modify', '--channelId', $inst.installedChannelId,
+            '--productId', $inst.installedProductId,
             '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
             '--quiet', '--wait', '--norestart')
           $code = (Start-Process -FilePath $installer -ArgumentList $modify -Wait -PassThru).ExitCode
@@ -174,10 +171,10 @@ jobs:
             if ($log) { "=== $($log.Name) ==="; Get-Content $log.FullName -Tail 40 }
             throw "vs_installer modify exited with $code"
           }
-          # Prove the toolset really landed before spending five minutes building.
-          $arm64 = Join-Path $path 'VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe'
+          # Report success only if the compiler is really there, so a silent
+          # no-op does not cost five minutes in cargo.
           if (-not (Get-Item $arm64 -ErrorAction SilentlyContinue)) {
-            throw "no arm64 compiler at $arm64"
+            throw "modify succeeded but no arm64 cl.exe under $($inst.installationPath)"
           }
 
       - name: Build
