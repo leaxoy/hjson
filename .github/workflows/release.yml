@@ -148,22 +148,36 @@ jobs:
         # which is why the unqualified call exited 1 in six seconds. Requiring
         # the x64 VC tools selects the image's C++ installation rather than,
         # say, a workload-less BuildTools copy.
+        #
+        # Start-Process rather than & because the previous attempt reported a
+        # blank exit code: -Wait -PassThru gives a real ExitCode, and the
+        # installer is quiet so the log tail is the only evidence left behind.
         run: |
           $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          "installer: $installer exists=$(Test-Path $installer)"
+          "vswhere: $vswhere exists=$(Test-Path $vswhere)"
+          & $vswhere -all -products * -format json | Write-Output
           $path = & $vswhere -latest -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath | Select-Object -First 1
           if (-not $path) { throw 'no Visual Studio C++ instance on this image' }
-          & $installer modify --installPath $path `
-            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait --norestart
-          $code = $LASTEXITCODE
+          "instance: $path"
+          $modify = @('modify', '--installPath', $path,
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            '--quiet', '--wait', '--norestart')
+          $code = (Start-Process -FilePath $installer -ArgumentList $modify -Wait -PassThru).ExitCode
           # 3010 means "finish after a reboot", which a runner never takes.
           if ($code -ne 0 -and $code -ne 3010) {
             $log = Get-ChildItem -Path $env:TEMP -Recurse -Filter 'Setup Log*.txt' -ErrorAction SilentlyContinue |
               Sort-Object LastWriteTime | Select-Object -Last 1
-            if ($log) { Get-Content $log.FullName -Tail 30 }
-            throw "vs_installer modify failed with exit code $code"
+            if ($log) { "=== $($log.Name) ==="; Get-Content $log.FullName -Tail 40 }
+            throw "vs_installer modify exited with $code"
+          }
+          # Prove the toolset really landed before spending five minutes building.
+          $arm64 = Join-Path $path 'VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe'
+          if (-not (Get-Item $arm64 -ErrorAction SilentlyContinue)) {
+            throw "no arm64 compiler at $arm64"
           }
 
       - name: Build
