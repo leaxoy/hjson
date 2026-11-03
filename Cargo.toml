@@ -1,0 +1,24 @@
+[package]
+name = "hjson"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui-kit = "0.8.1"
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "3", features = ["json"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# Settings persistence.
+dirs = "6"
+json-patch = "4.2.0"
+rust-i18n = "4"
+sys-locale = "0.3"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"

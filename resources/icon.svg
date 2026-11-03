@@ -1,0 +1,47 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#20233a"/>
+      <stop offset="1" stop-color="#111320"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7AA2F7"/>
+      <stop offset="1" stop-color="#BB9AF7"/>
+    </linearGradient>
+    <linearGradient id="braceLeft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7AA2F7"/>
+      <stop offset="1" stop-color="#4B93E8"/>
+    </linearGradient>
+    <linearGradient id="braceRight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#BB9AF7"/>
+      <stop offset="1" stop-color="#8C6FE8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Big Sur style rounded square -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <rect x="4" y="4" width="1016" height="1016" rx="228" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="8"/>
+
+  <!-- left brace { -->
+  <path d="M 300 232
+           C 236 232 236 340 236 400
+           C 236 464 200 512 148 512
+           C 200 512 236 560 236 624
+           C 236 684 236 792 300 792"
+        fill="none" stroke="url(#braceLeft)" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- right brace } -->
+  <path d="M 724 232
+           C 788 232 788 340 788 400
+           C 788 464 824 512 876 512
+           C 824 512 788 560 788 624
+           C 788 684 788 792 724 792"
+        fill="none" stroke="url(#braceRight)" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- H in the middle -->
+  <g fill="url(#accent)">
+    <rect x="446" y="384" width="34" height="256" rx="14"/>
+    <rect x="544" y="384" width="34" height="256" rx="14"/>
+    <rect x="452" y="490" width="120" height="42" rx="14"/>
+  </g>
+</svg>

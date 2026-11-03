@@ -1,0 +1,152 @@
+name: Release
+
+# Every push of a v* tag publishes installables for all platforms; a manual run
+# only uploads artifacts, which is how a branch gets tested end to end.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            # An untagged build still needs a name that cannot collide with a
+            # published one, so pin it to the commit.
+            base=$(scripts/version.sh)
+            echo "version=${base}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS is cross-built from one Apple Silicon runner: the SDK carries
+          # both architectures, so no Intel machine is needed.
+          - target: aarch64-apple-darwin
+            os: macos
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            os: macos
+            runner: macos-15
+          - target: x86_64-unknown-linux-gnu
+            os: linux
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: linux
+            runner: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows
+            runner: windows-latest
+          # Cross-linking MSVC arm64 needs the VS ARM64 toolset, which the
+          # runner image installs on demand; a failure here is not a release
+          # blocker while it settles.
+          - target: aarch64-pc-windows-msvc
+            os: windows
+            runner: windows-latest
+            optional: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional || false }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # Neither this crate nor the gpui stack declares a feature gate, so
+          # stable is the reproducible choice; the local toolchain happens to
+          # be nightly, which makes this workflow the first stable build.
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        # gpui's native side is C: X11/xcb for the window, xkbcommon for input,
+        # wayland for that display server, fontconfig + freetype for text.
+        # Textures come from Metal / Direct3D, and TLS is rustls, so there is no
+        # openssl to install. librsvg rasterizes the launcher icon.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-xcb-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype-dev librsvg2-bin
+
+      - name: Install the MSVC ARM64 toolset
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          & $installer modify --quiet --wait --norestart `
+            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 | Out-Null
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/package-macos.sh
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/package-linux.sh
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: scripts/package-windows.ps1 -Target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hjson-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    # Tags only; a manual run stops at the artifacts so nothing gets published
+    # by accident.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: HJson ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
