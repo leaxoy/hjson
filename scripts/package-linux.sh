@@ -46,6 +46,8 @@ MimeType=application/json;
 DESKTOP
 
 # .deb: the tree doubles as the package root, so no fakeroot or packing as root.
+# The Depends list mirrors the binary's DT_NEEDED plus what gpui opens at run
+# time (wayland, fontconfig); the linker line from a build is what names them.
 DEB="$DIST/${PREFIX}.deb"
 mkdir -p "$STAGE/DEBIAN"
 cat > "$STAGE/DEBIAN/control" <<CONTROL
@@ -55,7 +57,7 @@ Architecture: $ARCH
 Priority: optional
 Section: utils
 Maintainer: leaxoy <leaxoy@users.noreply.github.com>
-Depends: libx11-6, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6
+Depends: libx11-6, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libfontconfig1, libfreetype6
 Description: JSON viewer and structure comparer
  Parses and displays JSON as a collapsible tree beside its raw text, and
  compares two documents by JSONPath. Everything runs locally.

@@ -18,7 +18,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.pick.version }}
+      version: ${{ steps.pick.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - id: pick
@@ -55,15 +55,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows
             runner: windows-latest
-          # Cross-linking MSVC arm64 needs the VS ARM64 toolset, which the
-          # runner image installs on demand; a failure here is not a release
-          # blocker while it settles.
-          - target: aarch64-pc-windows-msvc
-            os: windows
-            runner: windows-latest
-            optional: true
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.optional || false }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -83,24 +75,22 @@ jobs:
 
       - name: Install Linux build dependencies
         if: matrix.os == 'linux'
-        # gpui's native side is C: X11/xcb for the window, xkbcommon for input,
-        # wayland for that display server, fontconfig + freetype for text.
-        # Textures come from Metal / Direct3D, and TLS is rustls, so there is no
-        # openssl to install. librsvg rasterizes the launcher icon.
+        # gpui's native side is C: xcb for the window, xkbcommon plus
+        # xkbcommon-x11 for input. The first CI run got as far as linking and
+        # then reported "unable to find library -lxkbcommon-x11", which is what
+        # these -dev packages provide; a missing one only shows up as a cc
+        # failure, never as a configure error. Textures come from Metal /
+        # Direct3D and TLS is rustls, so there is no openssl to install.
+        # libwayland-dev is not on the link line — the wayland code is loaded
+        # with dlopen — but a build script probes for it, so it stays.
+        # librsvg rasterizes the launcher icon.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libx11-xcb-dev libxkbcommon-dev libwayland-dev \
+            pkg-config libx11-xcb-dev libxcb1-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libfontconfig1-dev libfreetype-dev librsvg2-bin
-
-      - name: Install the MSVC ARM64 toolset
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        shell: pwsh
-        run: |
-          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-          & $installer modify --quiet --wait --norestart `
-            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 | Out-Null
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -125,6 +115,67 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: hjson-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  # Windows on ARM lives in its own job instead of the matrix above: the release
+  # job can only wait on jobs it expects to be green, and this one depends on the
+  # runner image managing to add the ARM64 MSVC toolset at runtime. When it works
+  # its artifact is picked up anyway, because download-artifact takes everything
+  # the run produced.
+  windows-arm64:
+    needs: version
+    continue-on-error: true
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc
+
+      - name: Install the MSVC ARM64 toolset
+        shell: pwsh
+        # modify acts on an instance, and vswhere is what reports its path — the
+        # Installer folder holding vs_installer.exe is not an instance itself,
+        # which is why the unqualified call exited 1 in six seconds. Requiring
+        # the x64 VC tools selects the image's C++ installation rather than,
+        # say, a workload-less BuildTools copy.
+        run: |
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $path = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath | Select-Object -First 1
+          if (-not $path) { throw 'no Visual Studio C++ instance on this image' }
+          & $installer modify --installPath $path `
+            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait --norestart
+          $code = $LASTEXITCODE
+          # 3010 means "finish after a reboot", which a runner never takes.
+          if ($code -ne 0 -and $code -ne 3010) {
+            $log = Get-ChildItem -Path $env:TEMP -Recurse -Filter 'Setup Log*.txt' -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime | Select-Object -Last 1
+            if ($log) { Get-Content $log.FullName -Tail 30 }
+            throw "vs_installer modify failed with exit code $code"
+          }
+
+      - name: Build
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: scripts/package-windows.ps1 -Target aarch64-pc-windows-msvc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hjson-aarch64-pc-windows-msvc
           path: dist/
           if-no-files-found: error
 
