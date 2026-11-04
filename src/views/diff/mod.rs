@@ -1,8 +1,8 @@
 //! The diff page: pick two JSON sources (A/B), each from its own titlebar
 //! load button, then show a two-column structural diff. The semantic engine
-//! lives in [`crate::diff`].
+//! lives in this module's [`algo`] submodule.
 
-use std::{collections::HashMap, ops::Range, rc::Rc};
+use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
@@ -17,16 +17,24 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TextAlign, WeakEntity, Window, div,
-    px, size,
+    ParentElement as _, Pixels, Render, RenderOnce, ScrollStrategy, SharedString, Size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, size,
 };
 
-use crate::chrome;
-use crate::diff::{DiffEntry, DiffKind, diff};
-use crate::highlight::{Span, SpanKind, highlight};
+use crate::components::chrome;
+use crate::components::json_text::{
+    JsonTextClickHandler, JsonTextGutter, JsonTextMarker, JsonTextMode, JsonTextView,
+    JsonTextViewProps,
+};
+use crate::document::SourceKind;
+use crate::document::{self, LoadedDocument};
+use crate::error::Status;
 use crate::json_model::JsonTree;
-use crate::source_menu::{SourceKind, file_title, url_title};
+use crate::syntax::{Span, highlight};
+
+mod algo;
+pub(crate) use self::algo::DiffKind;
+use self::algo::{DiffEntry, DiffOutput, diff_values};
 
 /// Which half of the comparison.
 pub type SideIx = usize;
@@ -96,6 +104,8 @@ fn diff_row() -> gpui_kit::Div {
 pub struct DiffView {
     app: WeakEntity<crate::app::HJsonApp>,
     phase: DiffPhase,
+    custom_tab_title: Option<SharedString>,
+    build_generation: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -122,9 +132,10 @@ struct SideConfig {
     title: Option<SharedString>,
     kind: Option<SourceKind>,
     text: Option<String>,
+    parsed: Option<Arc<JsonTree>>,
     /// Original URL when this side came from HTTP, for one-click re-fetch.
     url: Option<String>,
-    note: Option<crate::app::Status>,
+    note: Option<Status>,
     busy: bool,
 }
 
@@ -153,12 +164,13 @@ struct SideSource {
     title: SharedString,
     url: Option<String>,
     text: String,
+    parsed: Arc<JsonTree>,
 }
 
 /// Per-side rendered payload: syntax spans, gutter markers, entry lookup.
 struct SideLines {
     title: SharedString,
-    lines: Vec<Vec<Span>>,
+    lines: Rc<Vec<Vec<Span>>>,
     /// Gutter marker per line (`None` = unchanged line).
     marks: Vec<Option<DiffKind>>,
     /// Line → diff-entry index (for nav highlight).
@@ -166,19 +178,11 @@ struct SideLines {
     line_sizes: Rc<Vec<Size<Pixels>>>,
 }
 
-/// Accent color resolver for a diff kind against the runtime theme (used in
-/// the tab bar and status bar).
-pub fn diff_kind_color(kind: DiffKind, theme: &gpui_kit::component::Theme) -> gpui_kit::Hsla {
-    match kind {
-        DiffKind::Added => theme.success,
-        DiffKind::Removed => theme.danger,
-        DiffKind::Modified => theme.warning,
-        DiffKind::TypeChanged => theme.primary,
-    }
-}
-
 /// Diff tab label: A ⇆ B when both sides are loaded, otherwise 对比.
-pub fn tab_title(view: &DiffView) -> SharedString {
+pub(crate) fn tab_title(view: &DiffView) -> SharedString {
+    if let Some(title) = &view.custom_tab_title {
+        return title.clone();
+    }
     match &view.phase {
         DiffPhase::Config(cfg) => {
             let (a, b) = (
@@ -188,7 +192,7 @@ pub fn tab_title(view: &DiffView) -> SharedString {
             match (a, b) {
                 (Some(a), Some(b)) => format!("{a} ⇆ {b}").into(),
                 (Some(one), None) | (None, Some(one)) => one,
-                (None, None) => tr!("对比"),
+                (None, None) => tr!("Compare"),
             }
         }
         DiffPhase::Result(res) => format!("{} ⇆ {}", res.sides[0].title, res.sides[1].title).into(),
@@ -201,17 +205,19 @@ impl SideConfig {
             title: None,
             kind: None,
             text: None,
+            parsed: None,
             url: None,
             note: None,
             busy: false,
         }
     }
 
-    fn fill(&mut self, kind: SourceKind, title: SharedString, text: String, url: Option<String>) {
-        self.title = Some(title);
-        self.kind = Some(kind);
-        self.text = Some(text);
-        self.url = url;
+    fn fill(&mut self, document: LoadedDocument) {
+        self.title = Some(document.title.into());
+        self.kind = Some(document.kind);
+        self.text = Some(document.text);
+        self.parsed = Some(document.parsed);
+        self.url = document.url;
         self.note = None;
         self.busy = false;
     }
@@ -220,6 +226,7 @@ impl SideConfig {
         self.title = None;
         self.kind = None;
         self.text = None;
+        self.parsed = None;
         self.url = None;
         self.note = None;
         self.busy = false;
@@ -232,13 +239,28 @@ impl SideConfig {
             title: self.title.clone().unwrap_or_default(),
             url: self.url.clone(),
             text: self.text.clone().unwrap_or_default(),
+            parsed: self
+                .parsed
+                .clone()
+                .expect("a configured diff side is parsed"),
+        }
+    }
+}
+
+impl From<LoadedDocument> for SideSource {
+    fn from(document: LoadedDocument) -> Self {
+        Self {
+            kind: document.kind,
+            title: document.title.into(),
+            url: document.url,
+            text: document.text,
+            parsed: document.parsed,
         }
     }
 }
 
 impl ResultPhase {
-    fn build(sources: [SideSource; 2], line_h: f32) -> Self {
-        let out = diff(&sources[0].text, &sources[1].text);
+    fn from_output(sources: [SideSource; 2], line_h: f32, out: DiffOutput) -> Self {
         let entries = out.entries;
 
         let mut sides = [
@@ -283,20 +305,41 @@ impl DiffView {
             DiffPhase::Result(res) => (res.line_h, res.sources[1 - side].clone()),
             _ => return,
         };
-        if let Some(err) = JsonTree::parse(&source.text).error {
-            if let DiffPhase::Result(res) = &mut self.phase {
-                res.note = Some((side, format!("解析失败：{err}")));
-            }
-            cx.notify();
-            return;
-        }
         let sources = if side == SIDE_A {
             [source, other]
         } else {
             [other, source]
         };
-        self.phase = DiffPhase::Result(Box::new(ResultPhase::build(sources, line_h)));
+        self.start_diff(sources, line_h, cx);
+    }
+
+    fn start_diff(&mut self, sources: [SideSource; 2], line_h: f32, cx: &mut Context<Self>) {
+        self.build_generation += 1;
+        let generation = self.build_generation;
+        if let DiffPhase::Config(cfg) = &mut self.phase {
+            for side in &mut cfg.sides {
+                side.busy = true;
+                side.note = None;
+            }
+        }
         cx.notify();
+
+        let task = cx.background_spawn(async move {
+            let output = diff_values(&sources[SIDE_A].parsed.root, &sources[SIDE_B].parsed.root);
+            (sources, output)
+        });
+        cx.spawn(async move |this, cx| {
+            let (sources, output) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.build_generation {
+                    return;
+                }
+                this.phase =
+                    DiffPhase::Result(Box::new(ResultPhase::from_output(sources, line_h, output)));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---------- loading a source into one side ----------
@@ -305,9 +348,7 @@ impl DiffView {
     /// config page fills its slot, the result page re-runs the comparison.
     fn fill_source(&mut self, side: SideIx, source: SideSource, cx: &mut Context<Self>) {
         if matches!(self.phase, DiffPhase::Config(_)) {
-            self.with_config(|cfg| {
-                cfg.sides[side].fill(source.kind, source.title, source.text, source.url)
-            });
+            self.with_config(|cfg| cfg.sides[side].fill(source.into()));
             cx.notify();
         } else {
             self.reload_side(side, source, cx);
@@ -325,10 +366,7 @@ impl DiffView {
     ) {
         match &mut self.phase {
             DiffPhase::Config(cfg) => {
-                cfg.sides[side].note = Some(crate::app::Status {
-                    text: text.into(),
-                    ok,
-                });
+                cfg.sides[side].note = Some(Status::from_parts(ok, text));
                 cfg.sides[side].busy = false;
             }
             DiffPhase::Result(res) => {
@@ -345,21 +383,12 @@ impl DiffView {
             .and_then(|item| item.text())
             .map(|t| t.trim().to_string());
         match text {
-            Some(text) if !text.is_empty() => {
-                let kind = SourceKind::Clipboard;
-                self.fill_source(
-                    side,
-                    SideSource {
-                        title: kind.default_title(),
-                        kind,
-                        url: None,
-                        text,
-                    },
-                    cx,
-                )
-            }
-            Some(_) => self.note_side(side, false, tr!("剪贴板内容为空"), cx),
-            None => self.note_side(side, false, tr!("剪贴板里没有文本"), cx),
+            Some(text) if !text.is_empty() => match document::from_clipboard(text) {
+                Ok(document) => self.fill_source(side, document.into(), cx),
+                Err(err) => self.note_side(side, false, err.message(), cx),
+            },
+            Some(_) => self.note_side(side, false, tr!("The clipboard is empty"), cx),
+            None => self.note_side(side, false, tr!("No text on the clipboard"), cx),
         }
     }
 
@@ -377,27 +406,11 @@ impl DiffView {
                 _ => None,
             };
             let Some(path) = outcome else { return };
-            let read = cx.background_spawn(async move {
-                std::fs::read_to_string(&path)
-                    .map(|t| (path.clone(), t))
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-            });
+            let read = cx.background_spawn(async move { document::from_file(path) });
             let result = read.await;
             this.update_in(cx, |this, _window, cx| match result {
-                Ok((path, text)) => {
-                    let title = file_title(&path);
-                    this.fill_source(
-                        side,
-                        SideSource {
-                            kind: SourceKind::File,
-                            title: title.into(),
-                            url: None,
-                            text,
-                        },
-                        cx,
-                    );
-                }
-                Err(e) => this.note_side(side, false, format!("读取文件失败：{e}"), cx),
+                Ok(document) => this.fill_source(side, document.into(), cx),
+                Err(e) => this.note_side(side, false, e.message(), cx),
             })
             .ok();
         })
@@ -405,45 +418,33 @@ impl DiffView {
     }
 
     /// Fetch `url` and put the response into one side.
-    fn load_fetch(&mut self, side: SideIx, url: String, cx: &mut Context<Self>) {
+    fn load_fetch(
+        &mut self,
+        side: SideIx,
+        url: String,
+        custom_title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let url = url.trim().to_string();
         if url.is_empty() {
-            self.note_side(side, false, tr!("请输入 URL"), cx);
+            self.note_side(side, false, tr!("Enter a URL"), cx);
             return;
         }
         // Only the config page tracks an in-flight request.
         if let DiffPhase::Config(cfg) = &mut self.phase {
             cfg.sides[side].busy = true;
-            cfg.sides[side].note = Some(crate::app::Status {
-                text: format!("正在请求 {url} …"),
-                ok: true,
-            });
+            cfg.sides[side].note = Some(Status::success(
+                tr!("Requesting %{url} …", url = url.clone()).to_string(),
+            ));
         }
         cx.notify();
 
-        let task_url = url.clone();
-        let task = cx.background_spawn(async move {
-            let resp = ureq::get(&task_url).call()?;
-            let text = resp.into_body().read_to_string()?;
-            Ok::<String, anyhow::Error>(text)
-        });
+        let task = cx.background_spawn(async move { document::from_url(url, custom_title) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, _window, cx| match result {
-                Ok(text) => {
-                    let title = url_title(&url);
-                    this.fill_source(
-                        side,
-                        SideSource {
-                            kind: SourceKind::Url,
-                            title: title.into(),
-                            url: Some(url),
-                            text,
-                        },
-                        cx,
-                    );
-                }
-                Err(e) => this.note_side(side, false, format!("请求失败：{e}"), cx),
+                Ok(document) => this.fill_source(side, document.into(), cx),
+                Err(e) => this.note_side(side, false, e.message(), cx),
             })
             .ok();
         })
@@ -452,80 +453,80 @@ impl DiffView {
 
     /// Re-fetch the URL one side already came from.
     fn load_refetch(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        let url = match &self.phase {
-            DiffPhase::Config(cfg) => cfg.sides[side].url.clone(),
-            DiffPhase::Result(res) => res.sources[side].url.clone(),
+        let source = match &self.phase {
+            DiffPhase::Config(cfg) => (
+                cfg.sides[side].url.clone(),
+                cfg.sides[side].title.as_ref().map(ToString::to_string),
+            ),
+            DiffPhase::Result(res) => (
+                res.sources[side].url.clone(),
+                Some(res.sources[side].title.to_string()),
+            ),
         };
-        if let Some(url) = url {
-            self.load_fetch(side, url, cx);
+        if let (Some(url), title) = source {
+            self.load_fetch(side, url, title, cx);
         }
     }
 
     /// Replace one side with a document from the session history.
     fn load_history(&mut self, side: SideIx, id: u64, cx: &mut Context<Self>) {
-        let found = crate::source_menu::doc_of(&self.app, cx, id);
+        let found = crate::components::source_menu::prepared_doc_of(&self.app, cx, id);
         match found {
-            Some((kind, title, text, url)) => self.fill_source(
-                side,
-                SideSource {
-                    kind,
-                    title,
-                    url,
-                    text,
-                },
-                cx,
-            ),
-            None => self.note_side(side, false, tr!("该历史记录已不在列表中"), cx),
+            Some((kind, title, text, url, parsed)) => {
+                match document::from_history(kind, title.to_string(), text, url, parsed) {
+                    Ok(document) => self.fill_source(side, document.into(), cx),
+                    Err(err) => self.note_side(side, false, err.message(), cx),
+                }
+            }
+            None => self.note_side(side, false, tr!("That entry is no longer in the list"), cx),
         }
     }
 
     /// Replace one side with text typed into the manual-input dialog.
     fn load_manual(&mut self, side: SideIx, text: String, cx: &mut Context<Self>) {
-        let kind = SourceKind::Manual;
-        self.fill_source(
-            side,
-            SideSource {
-                title: kind.default_title(),
-                kind,
-                url: None,
-                text,
-            },
-            cx,
-        );
+        match document::from_manual(text) {
+            Ok(document) => self.fill_source(side, document.into(), cx),
+            Err(err) => self.note_side(side, false, err.message(), cx),
+        }
     }
 
     /// Replace one side with the built-in sample document.
     fn load_sample(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        let kind = SourceKind::Sample;
-        self.fill_source(
-            side,
-            SideSource {
-                title: kind.default_title(),
-                kind,
-                url: None,
-                text: crate::sample::TEXT.to_string(),
-            },
-            cx,
-        );
+        match document::from_sample() {
+            Ok(document) => self.fill_source(side, document.into(), cx),
+            Err(err) => self.note_side(side, false, err.message(), cx),
+        }
     }
 }
 
-impl crate::source_menu::LoadTarget for DiffView {
+impl From<SideSource> for LoadedDocument {
+    fn from(source: SideSource) -> Self {
+        Self {
+            kind: source.kind,
+            title: source.title.to_string(),
+            text: source.text,
+            url: source.url,
+            parsed: source.parsed,
+        }
+    }
+}
+
+impl crate::components::source_menu::LoadTarget for DiffView {
     type Slot = SideIx;
 
     fn apply_load(
         &mut self,
         side: SideIx,
-        method: crate::source_menu::LoadMethod,
+        method: crate::components::source_menu::LoadMethod,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::source_menu::LoadMethod;
+        use crate::components::source_menu::LoadMethod;
         match method {
             LoadMethod::Clipboard => self.load_clipboard(side, cx),
             LoadMethod::PickFile => self.load_file(side, cx),
             LoadMethod::RefetchUrl => self.load_refetch(side, cx),
-            LoadMethod::FetchUrl(url) => self.load_fetch(side, url, cx),
+            LoadMethod::FetchUrl { url, title } => self.load_fetch(side, url, title, cx),
             LoadMethod::Manual(text) => self.load_manual(side, text, cx),
             LoadMethod::Sample => self.load_sample(side, cx),
             LoadMethod::History(id) => self.load_history(side, id, cx),
@@ -536,7 +537,7 @@ impl crate::source_menu::LoadTarget for DiffView {
 fn build_side_lines(title: SharedString, pretty: &str) -> SideLines {
     SideLines {
         title,
-        lines: highlight(pretty),
+        lines: Rc::new(highlight(pretty)),
         marks: Vec::new(),
         entry_of_line: HashMap::new(),
         line_sizes: Rc::new(Vec::new()),
@@ -544,23 +545,30 @@ fn build_side_lines(title: SharedString, pretty: &str) -> SideLines {
 }
 
 impl DiffView {
-    /// `prefill` seeds one side directly (used by the viewer's compare
+    /// `prefill` seeds one side directly (used by the document view's compare
     /// button); `None` starts with two empty slots.
-    pub fn new(
+    pub(crate) fn new(
         app: WeakEntity<crate::app::HJsonApp>,
-        prefill: Option<(SideIx, SourceKind, SharedString, String, Option<String>)>,
+        prefill: Option<(SideIx, LoadedDocument)>,
     ) -> Self {
         let mut sides = [SideConfig::new(), SideConfig::new()];
 
-        if let Some((side, kind, title, text, url)) = prefill {
-            sides[side].fill(kind, title, text, url);
+        if let Some((side, document)) = prefill {
+            sides[side].fill(document);
         }
 
         Self {
             app,
             phase: DiffPhase::Config(Box::new(ConfigPhase { sides })),
+            custom_tab_title: None,
+            build_generation: 0,
             _subs: Vec::new(),
         }
+    }
+
+    pub fn set_tab_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        self.custom_tab_title = Some(title);
+        cx.notify();
     }
 
     fn with_config(&mut self, f: impl FnOnce(&mut ConfigPhase)) {
@@ -583,7 +591,9 @@ impl DiffView {
     fn config_ready(&self) -> bool {
         match &self.phase {
             DiffPhase::Config(cfg) => {
-                cfg.sides[SIDE_A].text.is_some() && cfg.sides[SIDE_B].text.is_some()
+                cfg.sides[SIDE_A].text.is_some()
+                    && cfg.sides[SIDE_B].text.is_some()
+                    && !cfg.sides.iter().any(|side| side.busy)
             }
             _ => false,
         }
@@ -597,14 +607,14 @@ impl DiffView {
         &self,
         side: SideIx,
         cx: &gpui_kit::App,
-    ) -> crate::source_menu::LoadOptions {
+    ) -> crate::components::source_menu::LoadOptions {
         let url = match &self.phase {
             DiffPhase::Config(cfg) => cfg.sides[side].url.clone(),
             DiffPhase::Result(res) => res.sources[side].url.clone(),
         };
-        crate::source_menu::LoadOptions {
+        crate::components::source_menu::LoadOptions {
             url,
-            history: crate::source_menu::history_of(&self.app, cx),
+            history: crate::components::source_menu::history_of(&self.app, cx),
         }
     }
 
@@ -618,7 +628,7 @@ impl DiffView {
                 cfg.sides[side]
                     .kind
                     .map(|k| k.label())
-                    .unwrap_or(tr!("还没有内容")),
+                    .unwrap_or(tr!("Nothing yet")),
                 cfg.sides[side].title.clone().unwrap_or_default(),
                 cfg.sides[side].title.is_some(),
             ),
@@ -628,16 +638,27 @@ impl DiffView {
                 true,
             ),
         };
-        let side_label = if side == SIDE_A { "A" } else { "B" };
-        let (icon, verb) = if filled {
-            (IconName::RefreshCw, tr!("重新载入"))
+        let side_label = if side == SIDE_A {
+            tr!("Side A")
         } else {
-            (IconName::Download, tr!("载入"))
+            tr!("Side B")
         };
-        crate::source_menu::header_load_button(
-            SharedString::from(format!("load-{side_label}")),
+        let (icon, verb) = if filled {
+            (IconName::RefreshCw, tr!("Reload"))
+        } else {
+            (IconName::Download, tr!("Load"))
+        };
+        crate::components::source_menu::header_load_button(
+            SharedString::from(format!("load-{side}")),
             icon,
-            format!("{verb} {side_label} 侧（当前：{title} · {kind}）"),
+            tr!(
+                "%{verb} %{side} (current: %{title} · %{kind})",
+                verb = verb.to_string(),
+                side = side_label.to_string(),
+                title = title.to_string(),
+                kind = kind.to_string()
+            )
+            .to_string(),
             side,
             self.side_load_options(side, cx),
             cx.weak_entity(),
@@ -663,7 +684,7 @@ impl DiffView {
             .py(px(20.))
             .gap_4()
             .child(div().text_sm().text_color(muted).child(
-                tr!("两侧各放入一份 JSON，按 JSONPath 对齐比较 · 对象不比键顺序 · 数组按下标对齐"),
+                tr!("One JSON per side, matched by JSONPath · object keys are order-independent · array items align by index"),
             ))
             .child(
                 h_flex()
@@ -681,12 +702,12 @@ impl DiffView {
                     .justify_center()
                     .child(if ready {
                         Button::new("start-diff")
-                            .label(tr!("开始对比"))
+                            .label(tr!("Start comparison"))
                             .primary()
                             .on_click(cx.listener(|this, _, _, cx| this.run_diff(cx)))
                     } else {
                         Button::new("start-diff")
-                            .label(tr!("两侧都放入内容后开始对比"))
+                            .label(tr!("Put content on both sides to start comparing"))
                             .disabled(true)
                     }),
             );
@@ -706,7 +727,11 @@ impl DiffView {
             let theme = cx.theme();
             (theme.border, theme.muted_foreground, theme.primary)
         };
-        let side_label = if side == SIDE_A { tr!("A 侧") } else { tr!("B 侧") };
+        let side_label = if side == SIDE_A {
+            tr!("Side A")
+        } else {
+            tr!("Side B")
+        };
         let (title, kind, busy, preview) = match &self.phase {
             DiffPhase::Config(cfg) => {
                 let s = &cfg.sides[side];
@@ -727,7 +752,7 @@ impl DiffView {
         // soon as it fires, so the side's titlebar says what is happening.
         let busy_chip = busy.then(|| {
             Button::new(SharedString::from(format!("side-busy-{side}")))
-                .label(tr!("请求中…"))
+                .label(tr!("Requesting…"))
                 .small()
                 .disabled(true)
                 .into_any_element()
@@ -773,12 +798,12 @@ impl DiffView {
                         .justify_center()
                         .text_sm()
                         .text_color(muted)
-                        .child(tr!("点击右上角的载入：粘贴 / 打开文件 / 拉取 URL / 从历史选择")),
+                        .child(tr!("Use Load in the top-right: paste / open file / fetch URL / pick from history")),
                 )
                 .into_any_element();
         }
 
-        let mono = crate::settings::settings(cx).mono_family(cx);
+        let mono = crate::views::settings::settings(cx).mono_family(cx);
         card.child(
             h_flex()
                 .gap_2()
@@ -804,7 +829,7 @@ impl DiffView {
                         .icon(IconName::X)
                         .ghost()
                         .small()
-                        .tooltip(tr!("移除该侧"))
+                        .tooltip(tr!("Remove this side"))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.with_config(|cfg| cfg.sides[side].clear());
@@ -835,12 +860,14 @@ impl DiffView {
             let theme = cx.theme();
             (theme.danger, theme.success)
         };
-        let mk = |n: Option<crate::app::Status>| {
+        let mk = |n: Option<Status>| {
             n.map(|s| {
+                let ok = s.is_success();
+                let text = s.message();
                 div()
                     .text_xs()
-                    .text_color(if s.ok { success } else { danger })
-                    .child(s.text)
+                    .text_color(if ok { success } else { danger })
+                    .child(text)
                     .into_any_element()
             })
         };
@@ -953,15 +980,18 @@ impl DiffView {
             let res = self.result_ref();
             path_col_width(
                 &res.entries,
-                &crate::settings::settings(cx).mono_family(cx),
+                &crate::views::settings::settings(cx).mono_family(cx),
                 window,
             )
         };
 
         let header = chrome::panel_header(
-            tr!("差异列表"),
-            vec![chrome::stat(format!("{total} 处"), cx)],
-            vec![chrome::stat(tr!("点击行定位到两侧"), cx)],
+            tr!("Changes"),
+            vec![chrome::stat(
+                tr!("%{count} changes", count = total.to_string()),
+                cx,
+            )],
+            vec![chrome::stat(tr!("Click a row to jump to both sides"), cx)],
             cx,
         );
 
@@ -1004,7 +1034,7 @@ impl DiffView {
                 div()
                     .w(px(DIFF_COL_KIND_W))
                     .flex_shrink_0()
-                    .child(title(tr!("变更类型"))),
+                    .child(title(tr!("Change"))),
             )
             .child(
                 div()
@@ -1013,7 +1043,7 @@ impl DiffView {
                     .min_w_0()
                     .child(title("JSONPath".into())),
             )
-            .child(div().flex_1().min_w_0().child(title(tr!("变更详情"))))
+            .child(div().flex_1().min_w_0().child(title(tr!("Detail"))))
             .into_any_element()
     }
 
@@ -1038,7 +1068,7 @@ impl DiffView {
                 theme.primary,
             )
         };
-        let mono = crate::settings::settings(cx).mono_family(cx);
+        let mono = crate::views::settings::settings(cx).mono_family(cx);
         let (entries, current) = {
             let res = self.result_ref();
             (&res.entries, res.current)
@@ -1132,7 +1162,7 @@ impl DiffView {
             let theme = cx.theme();
             (theme.background, theme.muted_foreground)
         };
-        let wanted_h = crate::settings::settings(cx).row_height();
+        let wanted_h = crate::views::settings::settings(cx).row_height();
         if let DiffPhase::Result(res) = &mut self.phase
             && res.line_h != wanted_h
         {
@@ -1208,7 +1238,7 @@ impl DiffView {
                         .justify_center()
                         .text_color(muted)
                         .text_sm()
-                        .child(tr!("空文档")),
+                        .child(tr!("Empty document")),
                 )
             })
             .into_any_element()
@@ -1218,38 +1248,22 @@ impl DiffView {
         &mut self,
         side: SideIx,
         range: Range<usize>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         // Batch together everything the row builder needs before the loop: the
         // theme borrows cx and the loop wants plain data.
-        let (row_h, font_size) = {
+        let row_h = {
             let res = self.result_ref();
-            (res.line_h, res.line_h - 8.0)
+            res.line_h
         };
-        let settings = crate::settings::settings(cx);
-        let colors = settings.syntax_colors(cx.theme().is_dark());
-        let mono = settings.mono_family(cx);
+        let settings = crate::views::settings::settings(cx);
         // Line numbers are a document-wide setting, so the diff obeys it too.
         let show_gutter = settings.line_numbers;
-        let (
-            foreground,
-            list_active,
-            list_hover,
-            border_default,
-            muted,
-            success,
-            danger,
-            warning,
-            primary,
-        ) = {
+        let (border_default, success, danger, warning, primary) = {
             let theme = cx.theme();
             (
-                theme.foreground,
-                theme.list_active,
-                theme.list_hover,
                 theme.border,
-                theme.muted_foreground,
                 theme.success,
                 theme.danger,
                 theme.warning,
@@ -1268,7 +1282,7 @@ impl DiffView {
         let (lines, marks, entry_of_line, current) = {
             let res = self.result_ref();
             let s = &res.sides[side];
-            (&s.lines, &s.marks, &s.entry_of_line, res.current)
+            (s.lines.clone(), &s.marks, &s.entry_of_line, res.current)
         };
 
         range
@@ -1277,80 +1291,33 @@ impl DiffView {
                 let entry_ix = entry_of_line.get(&ix).copied();
                 let is_current = entry_ix.is_some() && entry_ix == current;
 
-                let mut row = h_flex()
-                    .w_full()
-                    .h(px(row_h))
-                    .flex_shrink_0()
-                    .text_size(px(font_size))
-                    .font_family(mono.clone())
-                    .items_stretch()
-                    .id(SharedString::from(format!("diff-line-{side}-{ix}")))
-                    .when_some(entry_ix, |this, entry| {
-                        // A changed line is the other half of the table row:
-                        // clicking it selects the same entry.
-                        this.cursor_pointer()
-                            .when(!is_current, |this| this.hover(|this| this.bg(list_hover)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_entry(entry, cx);
-                            }))
-                    })
-                    .when(is_current, |this| this.bg(list_active))
-                    .when_some(mark, |this, kind| {
-                        this.border_l_2().border_color(color_of(kind))
-                    })
-                    .when(mark.is_none(), |this| {
-                        this.border_l_2().border_color(border_default)
-                    });
-
-                if show_gutter {
-                    row = row.child(
-                        div()
-                            .w(px(56.))
-                            .flex_shrink_0()
-                            .text_align(TextAlign::Right)
-                            .pr_2()
-                            .mr_2()
-                            .border_r_1()
-                            .border_color(border_default)
-                            .text_color(match mark {
-                                Some(kind) => color_of(kind),
-                                None => muted,
-                            })
-                            .child((ix + 1).to_string()),
-                    );
-                }
-                // The change glyph keeps its own column even without line
-                // numbers: it is the diff, not decoration.
-                row = row.child(
-                    div()
-                        .w(px(18.))
-                        .flex_shrink_0()
-                        .text_color(match mark {
-                            Some(kind) => color_of(kind),
-                            None => muted,
-                        })
-                        .child(mark.map(|k| k.glyph().to_string()).unwrap_or_default()),
-                );
-
-                let mut text = h_flex().flex_1().min_w_0().overflow_hidden();
-                for span in &lines[ix] {
-                    let color: Hsla = match span.kind {
-                        SpanKind::Key => colors.key.into(),
-                        SpanKind::Str => colors.string.into(),
-                        SpanKind::Num => colors.number.into(),
-                        SpanKind::Bool => colors.bool_kw.into(),
-                        SpanKind::Null => colors.null.into(),
-                        SpanKind::Punct => colors.punct.into(),
-                        SpanKind::Indent | SpanKind::Plain => foreground,
-                    };
-                    text = text.child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_color(color)
-                            .child(span.text.clone()),
-                    );
-                }
-                row = row.child(text);
+                let marker = mark.map(|kind| JsonTextMarker {
+                    glyph: kind.glyph().to_string().into(),
+                    color: color_of(kind),
+                });
+                let on_click: Option<JsonTextClickHandler> = entry_ix.map(|entry| {
+                    Box::new(cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
+                        this.select_entry(entry, cx);
+                    })) as JsonTextClickHandler
+                });
+                let row = JsonTextView::new(JsonTextViewProps {
+                    id: Some(SharedString::from(format!("diff-line-{side}-{ix}"))),
+                    ix,
+                    lines: lines.clone(),
+                    line_h: row_h,
+                    mode: JsonTextMode::Clipped,
+                    gutter: if show_gutter {
+                        JsonTextGutter::Fixed(px(56.))
+                    } else {
+                        JsonTextGutter::Hidden
+                    },
+                    marker_column: true,
+                    active: is_current,
+                    marker,
+                    border_color: Some(mark.map(color_of).unwrap_or(border_default)),
+                    on_click,
+                })
+                .render(window, cx);
                 row.into_any_element()
             })
             .collect()
@@ -1359,7 +1326,7 @@ impl DiffView {
     fn render_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, danger, success) = (theme.muted_foreground, theme.danger, theme.success);
-        let mono = crate::settings::settings(cx).mono_family(cx);
+        let mono = crate::views::settings::settings(cx).mono_family(cx);
         let (entry, counts, total, current, note) = {
             let res = self.result_ref();
             let counts = if res.entries.is_empty() {
@@ -1394,11 +1361,16 @@ impl DiffView {
             )
         };
         let nav = if total == 0 {
-            tr!("无差异").to_string()
+            tr!("No changes").to_string()
         } else {
             match current {
-                Some(cur) => format!("{}/{} 处", cur + 1, total),
-                None => format!("{total} 处差异"),
+                Some(cur) => tr!(
+                    "%{current}/%{total} changes",
+                    current = (cur + 1).to_string(),
+                    total = total.to_string()
+                )
+                .to_string(),
+                None => tr!("%{count} total changes", count = total.to_string()).to_string(),
             }
         };
 
@@ -1435,9 +1407,9 @@ impl DiffView {
                 .text_xs()
                 .text_color(muted)
                 .child(if counts.is_empty() {
-                    tr!("✓ 两份 JSON 完全一致")
+                    tr!("✓ The two documents are identical")
                 } else {
-                    tr!("点击下方差异列表中的行，或用 ◀ ▶ 在差异间跳转")
+                    tr!("Pick a row in the change list below, or step through with ◀ ▶")
                 })
                 .into_any_element(),
         };
@@ -1479,19 +1451,28 @@ impl DiffView {
             None => div().into_any_element(),
         };
 
-        chrome::status(cx)
-            .child(left)
-            .children(note.map(|(side, text)| {
-                let side_label = if side == SIDE_A { "A" } else { "B" };
-                div()
-                    .text_xs()
-                    .flex_shrink_0()
-                    .text_color(danger)
-                    .child(format!("{side_label} 侧 · {text}"))
-            }))
-            .child(div().flex_1())
-            .child(right)
-            .child(
+        let mut status = chrome::status(cx).left(left);
+        if let Some((side, text)) = note {
+            let side_label = if side == SIDE_A {
+                tr!("Side A")
+            } else {
+                tr!("Side B")
+            };
+            status = status.left(
+                div().text_xs().flex_shrink_0().text_color(danger).child(
+                    tr!(
+                        "%{side} · %{text}",
+                        side = side_label.to_string(),
+                        text = text
+                    )
+                    .to_string(),
+                ),
+            );
+        }
+
+        status = status
+            .right(right)
+            .right(
                 div()
                     .text_xs()
                     .flex_shrink_0()
@@ -1499,8 +1480,10 @@ impl DiffView {
                     .font_family(mono.clone())
                     .child(counts),
             )
-            .child(div().text_xs().flex_shrink_0().text_color(muted).child(nav))
-            .children((total > 0).then(|| {
+            .right(div().text_xs().flex_shrink_0().text_color(muted).child(nav));
+
+        if total > 0 {
+            status = status.right(
                 h_flex()
                     .gap_1()
                     .items_center()
@@ -1508,24 +1491,26 @@ impl DiffView {
                         Button::new("prev-diff")
                             .icon(IconName::ChevronUp)
                             .small()
-                            .tooltip(tr!("上一处差异 (⌘[)"))
+                            .tooltip(tr!("Previous change (⌘[)"))
                             .on_click(cx.listener(|this, _, _, cx| this.jump(-1, cx))),
                     )
                     .child(
                         Button::new("next-diff")
                             .icon(IconName::ChevronDown)
                             .small()
-                            .tooltip(tr!("下一处差异 (⌘])"))
+                            .tooltip(tr!("Next change (⌘])"))
                             .on_click(cx.listener(|this, _, _, cx| this.jump(1, cx))),
-                    )
-            }))
-            .into_any_element()
+                    ),
+            );
+        }
+
+        status.into_any_element()
     }
 
     // ---------- diff + navigation ----------
 
     fn run_diff(&mut self, cx: &mut Context<Self>) {
-        let line_h = crate::settings::settings(cx).row_height();
+        let line_h = crate::views::settings::settings(cx).row_height();
         let (a_src, b_src) = {
             let cfg = match &self.phase {
                 DiffPhase::Config(cfg) => cfg,
@@ -1537,17 +1522,7 @@ impl DiffView {
             return;
         }
 
-        // Validate both sides; surface the first parse error on its side.
-        for (side, text) in [(SIDE_A, a_src.text.as_str()), (SIDE_B, b_src.text.as_str())] {
-            let parsed = JsonTree::parse(text);
-            if let Some(err) = parsed.error {
-                self.note_side(side, false, format!("解析失败：{err}"), cx);
-                return;
-            }
-        }
-
-        self.phase = DiffPhase::Result(Box::new(ResultPhase::build([a_src, b_src], line_h)));
-        cx.notify();
+        self.start_diff([a_src, b_src], line_h, cx);
     }
 
     /// Move the selection `delta` entries and scroll both sides in sync.

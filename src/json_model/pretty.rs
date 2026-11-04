@@ -16,14 +16,14 @@ use serde_json::Value;
 
 use crate::json_model::{escape_single, is_simple_key};
 
-pub struct PrettyDoc {
-    pub text: String,
+pub(crate) struct PrettyDoc {
+    pub(crate) text: String,
     /// JSONPath → 0-based line in `text`.
-    pub anchors: HashMap<String, usize>,
+    pub(crate) anchors: HashMap<String, usize>,
 }
 
 /// One path segment for an object key: `.key` when simple, `['key']` otherwise.
-pub fn key_seg(key: &str) -> String {
+pub(crate) fn key_seg(key: &str) -> String {
     if is_simple_key(key) {
         format!(".{key}")
     } else {
@@ -41,7 +41,7 @@ fn pad(indent: usize) -> String {
 }
 
 /// Print `value` and map every node path to its line.
-pub fn document(value: &Value) -> PrettyDoc {
+pub(crate) fn document(value: &Value) -> PrettyDoc {
     let mut lines: Vec<String> = Vec::new();
     let mut anchors: HashMap<String, usize> = HashMap::new();
     emit(String::new(), value, 0, "$", &mut lines, &mut anchors);

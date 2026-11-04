@@ -1,5 +1,7 @@
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+pub(crate) mod pretty;
 
 /// The JSON type of a value, used for picking colors and icons in the tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,13 +28,6 @@ impl JsonType {
     }
 }
 
-/// A single path segment from the root to a node.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Seg {
-    Key(String),
-    Index(usize),
-}
-
 /// One row of the JSON tree arena. `id` is the index inside `JsonTree::nodes`.
 #[derive(Clone, Debug)]
 pub struct FlatNode {
@@ -46,8 +41,8 @@ pub struct FlatNode {
     pub typ: JsonType,
     /// Short inline summary for scalars; `"{ N }"` / `"[ N ]"` for collections.
     pub summary: String,
-    /// Path segments from the root, used for JSONPath / JSON Pointer.
-    pub segments: Vec<Seg>,
+    /// Line in the pretty document where this value starts.
+    pub line: Option<usize>,
 }
 
 pub struct JsonTree {
@@ -55,9 +50,6 @@ pub struct JsonTree {
     pub nodes: Vec<FlatNode>,
     /// Pretty-printed root JSON, kept for the raw panel.
     pub pretty: String,
-    /// Line of `pretty` where each JSONPath starts, from the same walk that
-    /// produced `pretty` — see [`crate::pretty`]. Keys match [`Self::json_path`].
-    pub anchors: HashMap<String, usize>,
     pub error: Option<String>,
 }
 
@@ -74,25 +66,22 @@ impl JsonTree {
                     index: None,
                     typ: JsonType::Null,
                     summary: String::new(),
-                    segments: Vec::new(),
+                    line: None,
                 }];
-                let mut segments = Vec::new();
-                let mut pointer = String::new();
-                let mut builder = Builder {
-                    nodes,
-                    seg_stack: &mut segments,
-                    pointer: &mut pointer,
-                };
+                let mut builder = Builder { nodes };
                 builder.attach(0, &root);
-                let nodes = std::mem::take(&mut builder.nodes);
+                let mut nodes = std::mem::take(&mut builder.nodes);
                 // One walk gives the raw panel its text and every node its
                 // line, so the two panes can never drift apart.
-                let doc = crate::pretty::document(&root);
+                let doc = pretty::document(&root);
+                for id in 0..nodes.len() {
+                    let path = json_path_for(&nodes, id);
+                    nodes[id].line = doc.anchors.get(&path).copied();
+                }
                 Self {
                     root,
                     nodes,
                     pretty: doc.text,
-                    anchors: doc.anchors,
                     error: None,
                 }
             }
@@ -100,7 +89,6 @@ impl JsonTree {
                 root: Value::Null,
                 nodes: Vec::new(),
                 pretty: String::new(),
-                anchors: HashMap::new(),
                 error: Some(e.to_string()),
             },
         }
@@ -128,76 +116,72 @@ impl JsonTree {
 
     /// Standard JSONPath for the node, e.g. `$.items[2].name`.
     pub fn json_path(&self, id: usize) -> String {
-        let mut path = String::new();
-        for seg in &self.nodes[id].segments {
-            match seg {
-                Seg::Key(key) => {
-                    if is_simple_key(key) {
-                        path.push('.');
-                        path.push_str(key);
-                    } else {
-                        path.push_str(&format!("['{}']", escape_single(key)));
-                    }
-                }
-                Seg::Index(i) => path.push_str(&format!("[{i}]")),
-            }
-        }
-        format!("${path}")
+        json_path_for(&self.nodes, id)
     }
 
     /// The line of [`Self::pretty`] where this node's value starts. `None`
     /// only for a node the pretty walk never reached (a failed parse).
     pub fn line_of(&self, id: usize) -> Option<usize> {
-        self.anchors.get(&self.json_path(id)).copied()
+        self.nodes.get(id)?.line
     }
 
     /// RFC 6901 JSON Pointer, e.g. `/items/2/name`.
     pub fn json_pointer(&self, id: usize) -> String {
         let mut s = String::new();
-        for seg in &self.nodes[id].segments {
-            match seg {
-                Seg::Key(key) => {
-                    s.push('/');
-                    s.push_str(&key.replace('~', "~0").replace('/', "~1"));
-                }
-                Seg::Index(i) => s.push_str(&format!("/{i}")),
+        for node_id in lineage(&self.nodes, id) {
+            let node = &self.nodes[node_id];
+            if let Some(key) = &node.key {
+                s.push('/');
+                s.push_str(&key.replace('~', "~0").replace('/', "~1"));
+            } else if let Some(index) = node.index {
+                s.push_str(&format!("/{index}"));
             }
         }
         s
     }
 
-    /// The sub-Value at `id` (cloned from the root).
-    pub fn resolve(&self, id: usize) -> Option<Value> {
+    /// The sub-value at `id`.
+    pub fn resolve_ref(&self, id: usize) -> Option<&Value> {
         let mut cur = &self.root;
-        for seg in &self.nodes[id].segments {
-            cur = match seg {
-                Seg::Key(key) => cur.as_object()?.get(key)?,
-                Seg::Index(i) => cur.as_array()?.get(*i)?,
+        for node_id in lineage(&self.nodes, id) {
+            let node = &self.nodes[node_id];
+            cur = if let Some(key) = &node.key {
+                cur.as_object()?.get(key)?
+            } else {
+                let index = node.index?;
+                cur.as_array()?.get(index)?
             };
         }
-        Some(cur.clone())
+        Some(cur)
+    }
+
+    /// The sub-value at `id` cloned from the root.
+    pub fn resolve(&self, id: usize) -> Option<Value> {
+        self.resolve_ref(id).cloned()
     }
 
     /// Pretty JSON of the subtree at `id`.
     pub fn subtree_json(&self, id: usize) -> Option<String> {
-        serde_json::to_string_pretty(&self.resolve(id)?).ok()
+        serde_json::to_string_pretty(self.resolve_ref(id)?).ok()
     }
 
     /// Compact JSON of the subtree at `id`.
     pub fn subtree_json_compact(&self, id: usize) -> Option<String> {
-        serde_json::to_string(&self.resolve(id)?).ok()
+        serde_json::to_string(self.resolve_ref(id)?).ok()
     }
 
     /// jq-style path, e.g. `["items"][2]["name"]` after `.`-able keys.
     pub fn jq_path(&self, id: usize) -> String {
         let mut s = String::new();
-        for seg in &self.nodes[id].segments {
-            match seg {
-                Seg::Key(key) => s.push_str(&format!(
+        for node_id in lineage(&self.nodes, id) {
+            let node = &self.nodes[node_id];
+            if let Some(key) = &node.key {
+                s.push_str(&format!(
                     "[\"{}\"]",
                     key.replace('\\', "\\\\").replace('"', "\\\"")
-                )),
-                Seg::Index(i) => s.push_str(&format!("[{i}]")),
+                ));
+            } else if let Some(index) = node.index {
+                s.push_str(&format!("[{index}]"));
             }
         }
         if s.is_empty() {
@@ -227,32 +211,44 @@ impl JsonTree {
     }
 }
 
-/// Incrementally builds the node arena.
-struct Builder<'a> {
-    nodes: Vec<FlatNode>,
-    seg_stack: &'a mut Vec<Seg>,
-    pointer: &'a mut String,
+fn lineage(nodes: &[FlatNode], id: usize) -> Vec<usize> {
+    let mut ids = Vec::with_capacity(nodes.get(id).map_or(0, |node| node.depth));
+    let mut current = Some(id);
+    while let Some(node_id) = current {
+        if nodes[node_id].parent.is_none() {
+            break;
+        }
+        ids.push(node_id);
+        current = nodes[node_id].parent;
+    }
+    ids.reverse();
+    ids
 }
 
-impl<'a> Builder<'a> {
-    fn push_seg(&mut self, seg: Seg) {
-        match &seg {
-            Seg::Key(k) => {
-                self.pointer.push('/');
-                push_key_str(&mut self.pointer, k);
+fn json_path_for(nodes: &[FlatNode], id: usize) -> String {
+    let mut path = String::from("$");
+    for node_id in lineage(nodes, id) {
+        let node = &nodes[node_id];
+        if let Some(key) = &node.key {
+            if is_simple_key(key) {
+                path.push('.');
+                path.push_str(key);
+            } else {
+                path.push_str(&format!("['{}']", escape_single(key)));
             }
-            Seg::Index(i) => self.pointer.push_str(&format!("/{i}")),
-        }
-        self.seg_stack.push(seg);
-    }
-
-    fn pop_seg(&mut self) {
-        self.seg_stack.pop();
-        if let Some(pos) = self.pointer.rfind('/') {
-            self.pointer.truncate(pos);
+        } else if let Some(index) = node.index {
+            path.push_str(&format!("[{index}]"));
         }
     }
+    path
+}
 
+/// Incrementally builds the node arena.
+struct Builder {
+    nodes: Vec<FlatNode>,
+}
+
+impl Builder {
     /// Fill the placeholder node at `slot` with `value` and all descendants.
     fn attach(&mut self, slot: usize, value: &Value) {
         match value {
@@ -262,10 +258,8 @@ impl<'a> Builder<'a> {
                 node.summary = format!("{{ {} }}", map.len());
                 node.children.reserve(map.len());
                 for (k, v) in map {
-                    self.push_seg(Seg::Key(k.clone()));
-                    let child = self.reserve(slot);
+                    let child = self.reserve(slot, Some(k.clone()), None);
                     self.attach(child, v);
-                    self.pop_seg();
                 }
             }
             Value::Array(arr) => {
@@ -274,10 +268,8 @@ impl<'a> Builder<'a> {
                 node.summary = format!("[ {} ]", arr.len());
                 node.children.reserve(arr.len());
                 for (i, v) in arr.iter().enumerate() {
-                    self.push_seg(Seg::Index(i));
-                    let child = self.reserve(slot);
+                    let child = self.reserve(slot, None, Some(i));
                     self.attach(child, v);
-                    self.pop_seg();
                 }
             }
             Value::String(s) => {
@@ -304,17 +296,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Reserve a slot for a new child of `parent` and set bookkeeping.
-    fn reserve(&mut self, parent: usize) -> usize {
+    fn reserve(&mut self, parent: usize, key: Option<String>, index: Option<usize>) -> usize {
         let depth = self.nodes[parent].depth + 1;
-        let segments = self.seg_stack.clone();
-        let key = match self.seg_stack.last() {
-            Some(Seg::Key(k)) => Some(k.clone()),
-            _ => None,
-        };
-        let index = match self.seg_stack.last() {
-            Some(Seg::Index(i)) => Some(*i),
-            _ => None,
-        };
         let id = self.nodes.len();
         self.nodes.push(FlatNode {
             parent: Some(parent),
@@ -324,20 +307,10 @@ impl<'a> Builder<'a> {
             index,
             typ: JsonType::Null,
             summary: String::new(),
-            segments,
+            line: None,
         });
         self.nodes[parent].children.push(id);
         id
-    }
-}
-
-fn push_key_str(pointer: &mut String, key: &str) {
-    for c in key.chars() {
-        match c {
-            '~' => pointer.push_str("~0"),
-            '/' => pointer.push_str("~1"),
-            _ => pointer.push(c),
-        }
     }
 }
 
@@ -354,18 +327,26 @@ pub(crate) fn escape_single(key: &str) -> String {
     key.replace('\'', "\\'")
 }
 
+/// The string as the tree shows it: quoted, never truncated, and with control
+/// characters spelled out (`\n`, `\t`, …) so a value that holds a real newline
+/// stays on its row instead of tearing the layout apart.
 fn summarize(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() > MAX_SUMMARY {
-        let head: String = chars[..MAX_SUMMARY].iter().collect();
-        format!("\"{}…\"", head)
-    } else {
-        format!("\"{s}\"")
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
     }
+    out.push('"');
+    out
 }
-
-/// Maximum inline summary length for strings. Exposed for tests.
-pub const MAX_SUMMARY: usize = 60;
 
 #[cfg(test)]
 mod tests {

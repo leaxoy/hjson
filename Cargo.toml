@@ -1,17 +1,17 @@
 [package]
 name = "hjson"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-gpui-kit = "0.8.1"
+gpui-kit = "0.9.0"
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "3", features = ["json"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 
 # Settings persistence.
-dirs = "6"
+dirs = "7"
 json-patch = "4.2.0"
 rust-i18n = "4"
 sys-locale = "0.3"
@@ -21,4 +21,16 @@ opt-level = 1
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# `fat` plus a single codegen unit is the smallest link rust will give up
+# performance for: cross-crate inlining can then drop everything the app never
+# reaches. The cost is build time, which only CI and a release run pay.
+lto = "fat"
+codegen-units = 1
+# A linked Rust binary carries the whole symbol table, which is dead weight for
+# a shipped app and costs a few megabytes. This covers every target; the macOS
+# and Linux packaging scripts repeat the job with the system strip, because
+# rustc reports a failure here only as a warning.
+strip = "symbols"
+# The unwind tables (frame + except + info) are several megabytes and only buy
+# a stack trace on a panic that already means the process is going away.
+panic = "abort"

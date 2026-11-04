@@ -24,6 +24,14 @@ rm -rf "$STAGE"; mkdir -p "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
   "$STAGE/usr/share/icons/hicolor/scalable/apps"
 cp "$BIN" "$STAGE/usr/bin/hjson"
 chmod 755 "$STAGE/usr/bin/hjson"
+# Same insurance as make-app.sh does for the macOS bundle: cargo's strip runs
+# rustc's bundled objcopy and only warns when that fails, which would leave the
+# symbol table inside the .deb. Writing to a temp keeps a failed strip from
+# touching the staged binary.
+if command -v strip >/dev/null; then
+  strip --strip-all -o "$STAGE/usr/bin/hjson.stripped" "$STAGE/usr/bin/hjson" 2>/dev/null \
+    && mv -f "$STAGE/usr/bin/hjson.stripped" "$STAGE/usr/bin/hjson"
+fi
 cp "$ROOT/resources/icon.svg" "$STAGE/usr/share/icons/hicolor/scalable/apps/hjson.svg"
 
 # A raster is what most panels actually show; skip it if librsvg is absent.

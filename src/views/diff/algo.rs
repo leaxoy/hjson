@@ -4,7 +4,7 @@
 //! documents); this module translates that patch into the entries the diff page
 //! renders, keeping its own contract:
 //!
-//! - Each side is printed by [`crate::pretty`], the same printer the viewer's
+//! - Each side is printed by [`crate::json_model::pretty`], the same printer the viewer's
 //!   raw panel uses, so the recorded path → line anchors drive the per-side
 //!   jump targets (and gutter markers) of the diff page.
 //! - Object key order is ignored: JSON Patch compares maps by content.
@@ -20,11 +20,11 @@ use json_patch::jsonptr::Pointer;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::pretty::{self, key_seg};
+use crate::json_model::pretty::{self, key_seg};
 
 /// Kind of a single difference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiffKind {
+pub(crate) enum DiffKind {
     /// Present in B only.
     Added,
     /// Present in A only.
@@ -37,7 +37,7 @@ pub enum DiffKind {
 
 impl DiffKind {
     /// Gutter glyph drawn at the anchored lines.
-    pub fn glyph(self) -> &'static str {
+    pub(super) fn glyph(self) -> &'static str {
         match self {
             Self::Added => "+",
             Self::Removed => "−",
@@ -46,12 +46,12 @@ impl DiffKind {
         }
     }
 
-    pub fn label(self) -> gpui_kit::SharedString {
+    pub(super) fn label(self) -> gpui_kit::SharedString {
         match self {
-            Self::Added => tr!("新增"),
-            Self::Removed => tr!("删除"),
-            Self::Modified => tr!("修改"),
-            Self::TypeChanged => tr!("类型变更"),
+            Self::Added => tr!("Added"),
+            Self::Removed => tr!("Removed"),
+            Self::Modified => tr!("Modified"),
+            Self::TypeChanged => tr!("Type changed"),
         }
     }
 }
@@ -59,18 +59,18 @@ impl DiffKind {
 /// One difference between the two documents. Subtrees count as a single
 /// entry, anchored at the first line of the subtree on each side.
 #[derive(Clone, Debug)]
-pub struct DiffEntry {
-    pub kind: DiffKind,
+pub(super) struct DiffEntry {
+    pub(super) kind: DiffKind,
     /// JSONPath of the differing node, e.g. `$.items[3].age`.
-    pub path: String,
+    pub(super) path: String,
     /// 0-based line in A's pretty text (`None` for Added).
-    pub a_line: Option<usize>,
+    pub(super) a_line: Option<usize>,
     /// 0-based line in B's pretty text (`None` for Removed).
-    pub b_line: Option<usize>,
+    pub(super) b_line: Option<usize>,
     /// Compact JSON of the value on A (`""` for Added).
-    pub old: String,
+    pub(super) old: String,
     /// Compact JSON of the value on B (`""` for Removed).
-    pub new: String,
+    pub(super) new: String,
 }
 
 impl DiffEntry {
@@ -122,20 +122,25 @@ fn locate<'a>(root: &'a Value, ptr: &Pointer, shift: usize) -> (String, Option<&
 }
 
 /// Result of comparing two documents.
-pub struct DiffOutput {
-    pub pretty_a: String,
-    pub pretty_b: String,
-    pub entries: Vec<DiffEntry>,
+pub(super) struct DiffOutput {
+    pub(super) pretty_a: String,
+    pub(super) pretty_b: String,
+    pub(super) entries: Vec<DiffEntry>,
 }
 
 /// Compare two JSON texts. Caller handles parse errors first (the config page
 /// validates per side), so this assumes both parse.
-pub fn diff(a_text: &str, b_text: &str) -> DiffOutput {
+#[cfg(test)]
+fn diff(a_text: &str, b_text: &str) -> DiffOutput {
     let a: Value = serde_json::from_str(a_text.trim()).unwrap_or(Value::Null);
     let b: Value = serde_json::from_str(b_text.trim()).unwrap_or(Value::Null);
+    diff_values(&a, &b)
+}
 
-    let side_a = pretty::document(&a);
-    let side_b = pretty::document(&b);
+/// Compare two values that the caller already parsed.
+pub(super) fn diff_values(a: &Value, b: &Value) -> DiffOutput {
+    let side_a = pretty::document(a);
+    let side_b = pretty::document(b);
 
     let mut entries: Vec<DiffEntry> = Vec::new();
     let mut record = |kind: DiffKind, path: String, old: Option<&Value>, new: Option<&Value>| {
@@ -151,24 +156,24 @@ pub fn diff(a_text: &str, b_text: &str) -> DiffOutput {
 
     // Removals already recorded, per array, in the patch's own pointer space.
     let mut removals: HashMap<String, usize> = HashMap::new();
-    for op in json_patch::diff(&a, &b).0 {
+    for op in json_patch::diff(a, b).0 {
         let ptr = op.path().to_buf();
         let array_key = ptr.parent().unwrap_or(&ptr).to_string();
         let shift = *removals.get(&array_key).unwrap_or(&0);
         match op {
             PatchOperation::Add(add) => {
-                let (path, value) = locate(&b, &add.path, 0);
+                let (path, value) = locate(b, &add.path, 0);
                 record(DiffKind::Added, path, None, value);
             }
             PatchOperation::Remove(remove) => {
                 *removals.entry(array_key).or_default() += 1;
-                let (path, value) = locate(&a, &remove.path, shift);
+                let (path, value) = locate(a, &remove.path, shift);
                 record(DiffKind::Removed, path, value, None);
             }
             PatchOperation::Replace(replace) => {
-                let (path, new_value) = locate(&b, &replace.path, shift);
+                let (path, new_value) = locate(b, &replace.path, shift);
                 let Some(new_value) = new_value else { continue };
-                let old_value = locate(&a, &replace.path, shift).1;
+                let old_value = locate(a, &replace.path, shift).1;
                 // The one correction the patch needs: it compares `1` and
                 // `1.0` strictly, which is not a change for us.
                 let same_number = matches!(

@@ -6,9 +6,9 @@ fn main() {
         .run(|cx| {
             gpui_kit::init(cx);
             hjson::app::init(cx);
-            hjson::settings::init(cx);
+            hjson::views::settings::init(cx);
             // After settings: the menu bar shows a check mark read from them.
-            hjson::menu::init(cx);
+            hjson::app::menu::init(cx);
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {
@@ -28,10 +28,10 @@ fn main() {
                 // cancelled when dropped, and this closure returns right after
                 // opening the window, which would silently remove the observer.
                 // While an appearance is forced the re-apply just re-asserts it.
-                hjson::settings::apply_appearance(Some(window), cx);
+                hjson::views::settings::apply_appearance(Some(window), cx);
                 window
                     .observe_window_appearance(|window, cx| {
-                        hjson::settings::apply_appearance(Some(window), cx);
+                        hjson::views::settings::apply_appearance(Some(window), cx);
                     })
                     .detach();
                 cx.new(|cx| hjson::app::HJsonApp::new(window, cx))

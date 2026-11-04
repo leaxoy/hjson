@@ -3,7 +3,8 @@
 //! Each named theme ships both a light and a dark variant, and the user picks
 //! which theme to use per app mode (the mode itself follows the system).
 
-use gpui_kit::Rgba;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::{App, Rgba};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SyntaxColors {
@@ -22,6 +23,32 @@ pub struct SyntaxTheme {
     pub name: &'static str,
     pub dark: SyntaxColors,
     pub light: SyntaxColors,
+}
+
+/// The two syntax palette variants a theme can provide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntaxMode {
+    Dark,
+    Light,
+}
+
+impl SyntaxMode {
+    /// Resolve the syntax mode from the active gpui-kit theme.
+    pub fn current(cx: &App) -> Self {
+        if cx.theme().is_dark() {
+            Self::Dark
+        } else {
+            Self::Light
+        }
+    }
+
+    pub fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+
+    pub fn is_current(self, cx: &App) -> bool {
+        self == Self::current(cx)
+    }
 }
 
 /// Const version of `gpui_kit::rgb` so the theme table can be a `const`.
@@ -103,4 +130,29 @@ pub fn find(name: &str) -> Option<&'static SyntaxTheme> {
 
 pub fn fallback() -> &'static SyntaxTheme {
     &THEMES[0]
+}
+
+/// Syntax colors for the active gpui-kit theme.
+pub fn active(cx: &App) -> &'static SyntaxColors {
+    colors_for(SyntaxMode::current(cx), cx)
+}
+
+/// Syntax colors for a specific mode, resolved from persisted settings.
+pub fn colors_for(mode: SyntaxMode, cx: &App) -> &'static SyntaxColors {
+    colors_from_settings(mode, crate::views::settings::settings(cx))
+}
+
+fn colors_from_settings(
+    mode: SyntaxMode,
+    settings: &crate::views::settings::Settings,
+) -> &'static SyntaxColors {
+    let name = match mode {
+        SyntaxMode::Dark => &settings.syntax_dark,
+        SyntaxMode::Light => &settings.syntax_light,
+    };
+    let theme = find(name).unwrap_or_else(fallback);
+    match mode {
+        SyntaxMode::Dark => &theme.dark,
+        SyntaxMode::Light => &theme.light,
+    }
 }

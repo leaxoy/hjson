@@ -59,6 +59,18 @@ mkdir -p "$DIST_APP/Contents/MacOS" "$DIST_APP/Contents/Resources"
 cp "$ICON_DIR/AppIcon.icns" "$DIST_APP/Contents/Resources/AppIcon.icns"
 cp "$BUILD_DIR/hjson" "$DIST_APP/Contents/MacOS/$APP_NAME"
 
+# Cargo's `strip = "symbols"` goes through rustc's bundled rust-objcopy, and a
+# toolchain whose copy cannot resolve libLLVM.dylib only warns and leaves the
+# symbol table in place. Stripping to a temp first means a failed strip cannot
+# corrupt the staged binary, and it happens before the sign below, so the
+# signature stays valid.
+BIN="$DIST_APP/Contents/MacOS/$APP_NAME"
+if strip -x -o "$BIN.tmp" "$BIN" 2>/dev/null; then
+  mv -f "$BIN.tmp" "$BIN"
+else
+  rm -f "$BIN.tmp"
+fi
+
 cat > "$DIST_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

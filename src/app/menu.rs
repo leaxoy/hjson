@@ -15,7 +15,7 @@ use crate::app::{
     CloseTab, CollapseAll, DiffNext, DiffPrev, DiffTab, ExpandAll, FindInDoc, NewTab, OpenFile,
     PasteJson, SelectNextTab, SelectPrevTab, ToggleHistory,
 };
-use crate::settings::{OpenSettings, Quit, ToggleLineNumbers, settings};
+use crate::views::settings::{OpenSettings, Quit, ToggleLineNumbers, settings};
 
 gpui_kit::actions!(hjson_menu, [About, Minimize]);
 
@@ -35,9 +35,9 @@ pub fn init(cx: &mut App) {
                     window.open_alert_dialog(cx, |alert, _, _| {
                         let version = env!("CARGO_PKG_VERSION");
                         alert
-                            .title(tr!("关于 HJson"))
+                            .title(tr!("About HJson"))
                             .description(tr!(
-                                "版本 %{version}\nJSON 查看与结构对比。全部解析、对比都在本机完成，数据不会离开这台设备。",
+                                "Version %{version}\nA JSON viewer and structure comparer. Everything is parsed and compared locally — your data never leaves this machine.",
                                 version = version
                             ))
                     });
@@ -65,41 +65,41 @@ pub fn install(cx: &mut App) {
 
     cx.set_menus(vec![
         Menu::new("HJson").items(vec![
-            MenuItem::action(tr!("关于 HJson"), About),
+            MenuItem::action(tr!("About HJson"), About),
             MenuItem::separator(),
-            MenuItem::action(tr!("设置…"), OpenSettings),
+            MenuItem::action(tr!("Settings…"), OpenSettings),
             MenuItem::separator(),
-            MenuItem::action(tr!("退出 HJson"), Quit),
+            MenuItem::action(tr!("Quit HJson"), Quit),
         ]),
-        Menu::new(tr!("文件")).items(vec![
-            MenuItem::action(tr!("新建标签页"), NewTab),
-            MenuItem::action(tr!("新建对比"), DiffTab),
+        Menu::new(tr!("File")).items(vec![
+            MenuItem::action(tr!("New tab"), NewTab),
+            MenuItem::action(tr!("New comparison"), DiffTab),
             MenuItem::separator(),
-            MenuItem::action(tr!("打开文件…"), OpenFile),
-            MenuItem::action(tr!("从剪贴板粘贴 JSON"), PasteJson),
+            MenuItem::action(tr!("Open file…"), OpenFile),
+            MenuItem::action(tr!("Paste JSON from clipboard"), PasteJson),
             MenuItem::separator(),
-            MenuItem::action(tr!("关闭标签页"), CloseTab),
+            MenuItem::action(tr!("Close tab"), CloseTab),
         ]),
         edit_menu(),
-        Menu::new(tr!("视图")).items(vec![
-            MenuItem::action(tr!("上一个标签页"), SelectPrevTab),
-            MenuItem::action(tr!("下一个标签页"), SelectNextTab),
+        Menu::new(tr!("View")).items(vec![
+            MenuItem::action(tr!("Previous tab"), SelectPrevTab),
+            MenuItem::action(tr!("Next tab"), SelectNextTab),
             MenuItem::separator(),
             // The native bar is built once, so it cannot carry the sidebar's
             // live open/closed state; the tab-bar button shows that instead.
-            MenuItem::action(tr!("历史记录"), ToggleHistory),
+            MenuItem::action(tr!("History"), ToggleHistory),
             MenuItem::separator(),
             // The document page's own controls, so the keys are discoverable.
-            MenuItem::action(tr!("过滤结构树…"), FindInDoc),
-            MenuItem::action(tr!("展开全部"), ExpandAll),
-            MenuItem::action(tr!("收起全部"), CollapseAll),
+            MenuItem::action(tr!("Filter the tree…"), FindInDoc),
+            MenuItem::action(tr!("Expand all"), ExpandAll),
+            MenuItem::action(tr!("Collapse all"), CollapseAll),
             MenuItem::separator(),
-            MenuItem::action(tr!("上一处差异"), DiffPrev),
-            MenuItem::action(tr!("下一处差异"), DiffNext),
+            MenuItem::action(tr!("Previous change"), DiffPrev),
+            MenuItem::action(tr!("Next change"), DiffNext),
             MenuItem::separator(),
-            MenuItem::action(tr!("显示行号"), ToggleLineNumbers).checked(line_numbers),
+            MenuItem::action(tr!("Show line numbers"), ToggleLineNumbers).checked(line_numbers),
         ]),
-        Menu::new(tr!("窗口")).items(vec![MenuItem::action(tr!("最小化"), Minimize)]),
+        Menu::new(tr!("Window")).items(vec![MenuItem::action(tr!("Minimize"), Minimize)]),
     ]);
 }
 
@@ -110,13 +110,13 @@ fn edit_menu() -> Menu {
     // derive in the module.
     use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 
-    Menu::new(tr!("编辑")).items(vec![
-        MenuItem::os_action(tr!("撤销"), Undo, OsAction::Undo),
-        MenuItem::os_action(tr!("重做"), Redo, OsAction::Redo),
+    Menu::new(tr!("Edit")).items(vec![
+        MenuItem::os_action(tr!("Undo"), Undo, OsAction::Undo),
+        MenuItem::os_action(tr!("Redo"), Redo, OsAction::Redo),
         MenuItem::separator(),
-        MenuItem::os_action(tr!("剪切"), Cut, OsAction::Cut),
-        MenuItem::os_action(tr!("复制"), Copy, OsAction::Copy),
-        MenuItem::os_action(tr!("粘贴"), Paste, OsAction::Paste),
-        MenuItem::os_action(tr!("全选"), SelectAll, OsAction::SelectAll),
+        MenuItem::os_action(tr!("Cut"), Cut, OsAction::Cut),
+        MenuItem::os_action(tr!("Copy"), Copy, OsAction::Copy),
+        MenuItem::os_action(tr!("Paste"), Paste, OsAction::Paste),
+        MenuItem::os_action(tr!("Select All"), SelectAll, OsAction::SelectAll),
     ])
 }

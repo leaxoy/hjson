@@ -86,7 +86,13 @@ impl Language {
     /// The bundle locale this choice selects right now.
     pub fn locale(self) -> &'static str {
         match self {
-            Self::Auto => if system_is_chinese() { ZH } else { EN },
+            Self::Auto => {
+                if system_is_chinese() {
+                    ZH
+                } else {
+                    EN
+                }
+            }
             Self::English => EN,
             Self::Chinese => ZH,
         }
@@ -180,9 +186,79 @@ mod tests {
         out
     }
 
+    fn source_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                source_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn unescape_key(raw: &str) -> String {
+        let mut out = String::new();
+        let mut chars = raw.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    fn tr_keys_in_source(text: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut rest = text;
+        while let Some(ix) = rest.find("tr!(") {
+            rest = &rest[ix + 4..];
+            rest = rest.trim_start();
+            let Some(after_quote) = rest.strip_prefix('"') else {
+                continue;
+            };
+
+            let mut escaped = false;
+            let mut end = None;
+            for (ix, ch) in after_quote.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    end = Some(ix);
+                    break;
+                }
+            }
+
+            if let Some(end) = end {
+                keys.push(unescape_key(&after_quote[..end]));
+                rest = &after_quote[end + 1..];
+            } else {
+                break;
+            }
+        }
+        keys
+    }
+
+    fn contains_chinese(text: &str) -> bool {
+        text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+
     /// The two locales are one catalog each: a key added for one language must
-    /// be added for the other, and an English value still written in Chinese
-    /// means the translation was skipped.
+    /// be added for the other. Keys are English source strings, and English
+    /// values must not fall back to Chinese copy.
     #[test]
     fn both_locales_cover_the_same_keys() {
         for stem in ["auto", "settings"] {
@@ -193,13 +269,48 @@ mod tests {
             en_keys.sort_unstable();
             zh_keys.sort_unstable();
             assert_eq!(en_keys, zh_keys, "{stem}: the two locales diverged");
-            for (key, value) in &en {
-                assert!(!value.is_empty(), "{stem}: {key} has no English text");
+            for key in &en_keys {
                 assert!(
-                    !value.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-                    "{stem}: {key} is still Chinese"
+                    !contains_chinese(key),
+                    "{stem}: key is still Chinese: {key}"
                 );
             }
+            for (key, value) in &en {
+                assert!(!value.is_empty(), "{stem}: {key} has no English text");
+                assert!(!contains_chinese(value), "{stem}: {key} is still Chinese");
+            }
         }
+    }
+
+    #[test]
+    fn auto_catalog_covers_all_tr_keys() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        source_files(&root.join("src"), &mut files);
+
+        let mut keys = Vec::new();
+        for file in files {
+            if file.file_name().is_some_and(|name| name == "i18n.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            keys.extend(tr_keys_in_source(&text));
+        }
+        keys.sort();
+        keys.dedup();
+
+        let en: std::collections::HashSet<_> = catalog_pairs("auto.en.toml")
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        let zh: std::collections::HashSet<_> = catalog_pairs("auto.zh.toml")
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+
+        let missing_en: Vec<_> = keys.iter().filter(|key| !en.contains(*key)).collect();
+        let missing_zh: Vec<_> = keys.iter().filter(|key| !zh.contains(*key)).collect();
+        assert!(missing_en.is_empty(), "auto.en.toml misses {missing_en:?}");
+        assert!(missing_zh.is_empty(), "auto.zh.toml misses {missing_zh:?}");
     }
 }

@@ -6,16 +6,10 @@
 rust_i18n::i18n!("locales", fallback = "en");
 
 pub mod app;
-pub mod chrome;
-pub mod diff;
-pub mod diff_view;
-pub mod highlight;
+pub mod components;
+pub mod document;
+pub mod error;
 pub mod i18n;
 pub mod json_model;
-pub mod menu;
-pub mod pretty;
-pub mod sample;
-pub mod settings;
-pub mod source_menu;
-pub mod syntax_theme;
-pub mod viewer;
+pub mod syntax;
+pub mod views;

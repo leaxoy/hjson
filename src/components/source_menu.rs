@@ -1,97 +1,24 @@
-//! The shared "load a JSON document" menu, and the vocabulary that comes with
-//! it: [`SourceKind`] is where a document came from, [`LoadMethod`] is how the
-//! user asks for one. Every page reloads from the same sources the home page
-//! offers — clipboard, file, URL, manual input, sample, session history — and
-//! draws them with the same label / icon / color, from here.
+//! The shared "load a JSON document" menu. Every page reloads from the same
+//! sources the home page offers — clipboard, file, URL, manual input, sample,
+//! session history — and draws them with the same labels and icons.
 
-use std::cell::Cell;
+use std::{cell::Cell, sync::Arc};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::{
-    App, AppContext as _, Context, Focusable as _, Hsla, IntoElement, ParentElement as _,
-    SharedString, WeakEntity, Window, px,
+    AppContext as _, Context, Focusable as _, IntoElement, ParentElement as _, SharedString,
+    Styled as _, WeakEntity, Window, px,
 };
 
 use crate::app::HJsonApp;
-
-/// Where a document came from — the provenance every page labels, icons and
-/// colors with. The load menu hands it to the pages that record it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SourceKind {
-    Url,
-    File,
-    Clipboard,
-    Manual,
-    Sample,
-}
-
-impl SourceKind {
-    /// Short tag for history rows and diff side labels.
-    pub fn label(self) -> SharedString {
-        match self {
-            Self::Url => "URL".into(),
-            Self::File => tr!("文件"),
-            Self::Clipboard => tr!("剪贴板"),
-            Self::Manual => tr!("手动输入"),
-            Self::Sample => tr!("示例"),
-        }
-    }
-
-    /// The one glyph for this source, shared by tabs, history and load menu.
-    pub fn icon(self) -> IconName {
-        match self {
-            Self::Url => IconName::Globe,
-            Self::File => IconName::FileText,
-            Self::Clipboard => IconName::ClipboardList,
-            Self::Manual => IconName::PenLine,
-            Self::Sample => IconName::Beaker,
-        }
-    }
-
-    /// Accent color for the source chip, taken from the theme palette so the
-    /// same source reads correctly in either appearance.
-    pub fn color(self, cx: &App) -> Hsla {
-        let theme = cx.theme();
-        match self {
-            Self::Url => theme.blue,
-            Self::File => theme.green,
-            Self::Clipboard => theme.magenta,
-            Self::Manual => theme.cyan,
-            Self::Sample => theme.yellow,
-        }
-    }
-
-    /// Title for a document that has no name of its own — the URL and the
-    /// picked file are titled by [`url_title`] / [`file_title`] instead.
-    pub fn default_title(self) -> SharedString {
-        match self {
-            Self::Clipboard => tr!("剪贴板内容"),
-            Self::Manual => tr!("手动输入"),
-            Self::Sample => tr!("示例 JSON"),
-            Self::Url | Self::File => "JSON".into(),
-        }
-    }
-}
-
-/// Title for a file on disk: its name, without the path.
-pub fn file_title(path: &std::path::Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file.json")
-        .to_string()
-}
-
-/// Title for a URL: its last path segment.
-pub fn url_title(url: &str) -> String {
-    url.split('/').next_back().unwrap_or("JSON").to_string()
-}
+use crate::document::SourceKind;
+use crate::json_model::JsonTree;
 
 /// One of the import methods, mirroring the home page.
 #[derive(Clone)]
@@ -103,7 +30,7 @@ pub enum LoadMethod {
     /// Re-fetch the URL the current document came from.
     RefetchUrl,
     /// Fetch a URL typed into the load dialog.
-    FetchUrl(String),
+    FetchUrl { url: String, title: Option<String> },
     /// Text typed into the manual-input dialog.
     Manual(String),
     /// The built-in sample document.
@@ -119,7 +46,7 @@ impl LoadMethod {
         match self {
             Self::Clipboard => Some(SourceKind::Clipboard),
             Self::PickFile => Some(SourceKind::File),
-            Self::RefetchUrl | Self::FetchUrl(_) => Some(SourceKind::Url),
+            Self::RefetchUrl | Self::FetchUrl { .. } => Some(SourceKind::Url),
             Self::Manual(_) => Some(SourceKind::Manual),
             Self::Sample => Some(SourceKind::Sample),
             Self::History(_) => None,
@@ -140,7 +67,7 @@ impl LoadMethod {
 }
 
 /// A page that loads documents into one or more slots. `Slot` is `()` for the
-/// viewer's single document and a side index for the diff pages.
+/// document view's single document and a side index for the diff pages.
 pub trait LoadTarget: Sized + 'static {
     type Slot: Copy + 'static;
 
@@ -178,12 +105,17 @@ pub fn history_of(app: &WeakEntity<HJsonApp>, cx: &gpui_kit::App) -> Vec<History
         .collect()
 }
 
-/// The raw document behind a history id: kind, title, text, URL.
-pub fn doc_of(
+pub fn prepared_doc_of(
     app: &WeakEntity<HJsonApp>,
     cx: &gpui_kit::App,
     id: u64,
-) -> Option<(SourceKind, SharedString, String, Option<String>)> {
+) -> Option<(
+    SourceKind,
+    SharedString,
+    String,
+    Option<String>,
+    Option<Arc<JsonTree>>,
+)> {
     let app = app.upgrade()?;
     let entry = app.read(cx).docs.iter().find(|d| d.id == id)?;
     Some((
@@ -191,6 +123,7 @@ pub fn doc_of(
         entry.title.clone(),
         entry.text.clone(),
         entry.url.clone(),
+        entry.parsed.upgrade(),
     ))
 }
 
@@ -232,20 +165,20 @@ pub fn add_load_items<T: LoadTarget>(
         .item(method_item(
             &target,
             slot,
-            tr!("从剪贴板粘贴"),
+            tr!("Paste from clipboard"),
             LoadMethod::Clipboard,
         ))
         .item(method_item(
             &target,
             slot,
-            tr!("打开文件…"),
+            tr!("Open file…"),
             LoadMethod::PickFile,
         ));
     if url.is_some() {
         menu = menu.item(method_item(
             &target,
             slot,
-            tr!("重新拉取 URL"),
+            tr!("Re-fetch the URL"),
             LoadMethod::RefetchUrl,
         ));
     }
@@ -254,7 +187,7 @@ pub fn add_load_items<T: LoadTarget>(
     menu = menu.separator().item(dialog_item(
         &target,
         slot,
-        tr!("从 URL 载入…"),
+        tr!("Load from URL…"),
         SourceKind::Url.icon(),
         move |target, slot, window, cx| {
             open_url_dialog(&target, slot, dialog_url.clone(), window, cx)
@@ -263,16 +196,22 @@ pub fn add_load_items<T: LoadTarget>(
     menu = menu.item(dialog_item(
         &target,
         slot,
-        tr!("手动输入…"),
+        tr!("Type manually…"),
         SourceKind::Manual.icon(),
         |target, slot, window, cx| open_manual_dialog(&target, slot, window, cx),
     ));
 
-    menu = menu.item(method_item(&target, slot, tr!("载入示例"), LoadMethod::Sample));
+    menu = menu.item(method_item(
+        &target,
+        slot,
+        tr!("Load the sample"),
+        LoadMethod::Sample,
+    ));
 
-    menu.submenu(tr!("从历史载入"), window, cx, move |sub, _, _| {
+    menu.submenu(tr!("Load from history"), window, cx, move |sub, _, _| {
         if history.is_empty() {
-            return sub.item(PopupMenuItem::new(tr!("本会话还没有导入记录")).disabled(true));
+            return sub
+                .item(PopupMenuItem::new(tr!("No imports in this session yet")).disabled(true));
         }
         let mut sub = sub.max_h(px(320.)).scrollable(true);
         for (id, title, kind) in history.iter() {
@@ -336,7 +275,7 @@ fn dialog_item<T: LoadTarget>(
 
 /// Ask for a URL, then load it through [`LoadMethod::FetchUrl`].
 ///
-/// Also the home page's "从 URL 获取" entry: pages with no URL of their own
+/// Also the home page's "Fetch from URL" entry: pages with no URL of their own
 /// pass `initial: None`.
 pub fn open_url_dialog<T: LoadTarget>(
     target: &WeakEntity<T>,
@@ -345,15 +284,18 @@ pub fn open_url_dialog<T: LoadTarget>(
     window: &mut Window,
     cx: &mut gpui_kit::App,
 ) {
-    let input =
+    let url_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("https://api.example.com/data.json"));
     if let Some(url) = initial {
-        input.update(cx, |state, cx| state.set_value(url, window, cx));
+        url_input.update(cx, |state, cx| state.set_value(url, window, cx));
     }
+    let title_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Optional: tab title")));
 
     let focused = Cell::new(true);
-    let focus_state = input.clone();
-    let ok_state = input.clone();
+    let focus_state = url_input.clone();
+    let ok_url = url_input.clone();
+    let ok_title = title_input.clone();
     let ok_target = target.clone();
     window.open_alert_dialog(cx, move |alert, window, cx| {
         // Focus on the first build only, so a layer rebuild cannot yank focus
@@ -361,22 +303,30 @@ pub fn open_url_dialog<T: LoadTarget>(
         if focused.replace(false) {
             focus_state.focus_handle(cx).focus(window, cx);
         }
-        let state = ok_state.clone();
+        let url_state = ok_url.clone();
+        let title_state = ok_title.clone();
         let submit = ok_target.clone();
         alert
-            .title(tr!("从 URL 载入"))
-            .description(tr!("输入 JSON 接口地址，回车或点击「载入」。"))
-            .ok_text(tr!("载入"))
+            .title(tr!("Load from URL"))
+            .description(tr!("Enter a JSON endpoint. You can also set a tab title."))
+            .ok_text(tr!("Load"))
             .confirm()
-            .child(Input::new(&state))
+            .child(
+                gpui_kit::component::v_flex()
+                    .gap_2()
+                    .child(Input::new(&url_state))
+                    .child(Input::new(&title_state)),
+            )
             .on_ok(move |_, window, cx| {
-                let url = state.read(cx).value().trim().to_string();
+                let url = url_state.read(cx).value().trim().to_string();
                 if url.is_empty() {
                     return false;
                 }
+                let title = title_state.read(cx).value().trim().to_string();
+                let title = (!title.is_empty()).then_some(title);
                 submit
                     .update(cx, |this, cx| {
-                        this.apply_load(slot, LoadMethod::FetchUrl(url), window, cx)
+                        this.apply_load(slot, LoadMethod::FetchUrl { url, title }, window, cx)
                     })
                     .ok();
                 true
@@ -405,9 +355,11 @@ pub fn open_manual_dialog<T: LoadTarget>(
         let read = ok_state.clone();
         let submit = ok_target.clone();
         alert
-            .title(tr!("手动输入 JSON"))
-            .description(tr!("粘贴或输入 JSON 文本，解析成功后替换当前内容。"))
-            .ok_text(tr!("格式化并载入"))
+            .title(tr!("Type JSON manually"))
+            .description(tr!(
+                "Paste or type JSON; a successful parse replaces the current document."
+            ))
+            .ok_text(tr!("Format and load"))
             .confirm()
             .child(field)
             .on_ok(move |_, window, cx| {
