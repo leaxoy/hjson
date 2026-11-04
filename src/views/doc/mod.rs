@@ -15,12 +15,15 @@ use std::{collections::HashSet, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::actions::{
-    Confirm, SelectDown, SelectFirst, SelectLast, SelectPageDown, SelectPageUp, SelectUp,
+use gpui_kit::base::{
+    Selectable as _,
+    actions::{
+        Confirm, SelectDown, SelectFirst, SelectLast, SelectPageDown, SelectPageUp, SelectUp,
+    },
 };
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, VirtualListScrollHandle,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
@@ -87,6 +90,41 @@ enum ExpandMode {
     All,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocPaneMode {
+    Split,
+    Text,
+    Tree,
+}
+
+impl DocPaneMode {
+    const ALL: [DocPaneMode; 3] = [Self::Split, Self::Text, Self::Tree];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Split => "doc-pane-mode-split",
+            Self::Text => "doc-pane-mode-text",
+            Self::Tree => "doc-pane-mode-tree",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Split => IconName::Columns2,
+            Self::Text => IconName::FileText,
+            Self::Tree => IconName::ListTree,
+        }
+    }
+
+    fn tooltip(self) -> SharedString {
+        match self {
+            Self::Split => tr!("Show text and tree"),
+            Self::Text => tr!("Show text only"),
+            Self::Tree => tr!("Show tree only"),
+        }
+    }
+}
+
 pub struct DocView {
     app: WeakEntity<crate::app::HJsonApp>,
     pub title: SharedString,
@@ -112,6 +150,7 @@ pub struct DocView {
     selected_node: Option<usize>,
     tree_list: ListState,
     tree_focus: FocusHandle,
+    pane_mode: DocPaneMode,
     search: Entity<InputState>,
     search_locale: &'static str,
     search_task: Option<Task<()>>,
@@ -184,6 +223,7 @@ impl DocView {
             selected_node: None,
             tree_list,
             tree_focus: cx.focus_handle(),
+            pane_mode: DocPaneMode::Split,
             search,
             search_locale,
             search_task: None,
@@ -678,7 +718,7 @@ impl gpui_kit::Render for DocView {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(self.render_split(window, cx)),
+                    .child(self.render_body(window, cx)),
             )
             .child(self.render_status(cx))
     }
@@ -721,6 +761,48 @@ impl DocView {
             .into_any_element()
     }
 
+    fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        match self.pane_mode {
+            DocPaneMode::Split => self.render_split(window, cx),
+            DocPaneMode::Text => self.render_raw_panel(window, cx),
+            DocPaneMode::Tree => self.render_tree_panel(window, cx),
+        }
+    }
+
+    fn set_pane_mode(&mut self, mode: DocPaneMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane_mode = mode;
+        match mode {
+            DocPaneMode::Split => {}
+            DocPaneMode::Text => self.raw_focus.focus(window, cx),
+            DocPaneMode::Tree => self.tree_focus.focus(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn pane_mode_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.pane_mode;
+        ButtonGroup::new("doc-pane-mode")
+            .compact()
+            .children(DocPaneMode::ALL.into_iter().map(|mode| {
+                Button::new(mode.id())
+                    .icon(mode.icon())
+                    .ghost()
+                    .small()
+                    .selected(mode == selected)
+                    .accessibility_label(mode.tooltip())
+                    .tooltip(mode.tooltip())
+            }))
+            .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+                let Some(ix) = selected.first() else {
+                    return;
+                };
+                if let Some(mode) = DocPaneMode::ALL.get(*ix).copied() {
+                    this.set_pane_mode(mode, window, cx);
+                }
+            }))
+            .into_any_element()
+    }
+
     // ----- left: raw panel -----
 
     fn render_raw_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -753,6 +835,7 @@ impl DocView {
                 crate::app::human_size(byte_size, cx),
             ],
             vec![
+                self.pane_mode_toggle(cx),
                 // The document's own controls, docked in the document's
                 // header: reload it (from its source or another one), and
                 // start a comparison with it on the A side.
@@ -1021,6 +1104,7 @@ impl DocView {
                 )
             }],
             vec![
+                self.pane_mode_toggle(cx),
                 // The tree's own filter, in the tree's header: typing narrows
                 // this pane, nothing else on the page.
                 div()
