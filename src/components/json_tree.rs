@@ -49,7 +49,7 @@ pub fn tree_list_splice<T: Eq>(old: &[T], new: &[T]) -> (Range<usize>, usize) {
     (prefix..old.len() - suffix, new.len() - prefix - suffix)
 }
 
-pub fn node_label(doc: &JsonTree, id: usize) -> SharedString {
+fn node_label(doc: &JsonTree, id: usize) -> SharedString {
     let n = &doc.nodes[id];
     match (&n.key, &n.summary) {
         (Some(k), _) => format!("{k}: {}", n.summary).into(),
@@ -202,18 +202,14 @@ impl JsonTreeView {
 }
 
 impl RenderOnce for JsonTreeView {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let props = self.props;
         if props.rows.is_empty() {
-            return div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(props.empty_message)
-                .into_any_element();
+            return crate::components::chrome::empty_state(
+                IconName::SearchX,
+                props.empty_message,
+                None,
+            );
         }
 
         let list_state = props.list_state.clone();

@@ -1,15 +1,17 @@
-use super::HJsonApp;
+use super::{HJsonApp, OpenFile, PasteJson};
 use crate::components::chrome;
 use crate::components::source_menu::{LoadMethod, LoadTarget, open_manual_dialog, open_url_dialog};
 use crate::document::{self, LoadedDocument, SourceKind};
 use crate::error::{AppError, Status};
 use crate::tr;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, WeakEntity, Window, div, img, px,
 };
+use std::sync::{Arc, OnceLock};
 
 /// One home tab: the OK-JSON-style import page. The documents it opens and the
 /// session history both belong to the app, so any tab can hand a document to
@@ -24,8 +26,16 @@ impl HomeView {
         Self { app, status: None }
     }
 
-    pub(super) fn set_status(&mut self, ok: bool, text: impl Into<String>) {
-        self.status = Some(Status::from_parts(ok, text));
+    /// Success notes stay on the page's status line; failures pop up as
+    /// notifications so they cannot be missed.
+    pub(super) fn set_status(&mut self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        if ok {
+            self.status = Some(Status::from_parts(true, text));
+        } else {
+            self.status = None;
+            chrome::notify_failure(text, cx);
+        }
     }
 
     /// Hand a loaded document to the app: the active home tab turns into the
@@ -49,7 +59,7 @@ impl HomeView {
                 Ok(id)
             }
             Err(err) => {
-                self.set_status(false, AppError::parse(err.as_str()).message());
+                self.set_status(false, AppError::parse(err.as_str()).message(), cx);
                 Err(err)
             }
         }
@@ -62,10 +72,10 @@ impl HomeView {
                 Ok(document) => {
                     let _ = self.submit(document, window, cx);
                 }
-                Err(err) => self.set_status(false, err.message()),
+                Err(err) => self.set_status(false, err.message(), cx),
             },
-            Some(_) => self.set_status(false, tr!("The clipboard is empty")),
-            None => self.set_status(false, tr!("No text on the clipboard")),
+            Some(_) => self.set_status(false, tr!("The clipboard is empty"), cx),
+            None => self.set_status(false, tr!("No text on the clipboard"), cx),
         }
         cx.notify();
     }
@@ -75,7 +85,7 @@ impl HomeView {
             Ok(document) => {
                 let _ = self.submit(document, window, cx);
             }
-            Err(err) => self.set_status(false, err.message()),
+            Err(err) => self.set_status(false, err.message(), cx),
         }
         cx.notify();
     }
@@ -99,7 +109,7 @@ impl HomeView {
             Ok(document) => {
                 let _ = self.submit(document, window, cx);
             }
-            Err(err) => self.set_status(false, err.message()),
+            Err(err) => self.set_status(false, err.message(), cx),
         }
         cx.notify();
     }
@@ -117,7 +127,7 @@ impl HomeView {
     ) {
         let url = url.trim().to_string();
         if url.is_empty() {
-            self.set_status(false, tr!("Enter a URL").to_string());
+            self.set_status(false, tr!("Enter a URL").to_string(), cx);
             cx.notify();
             return;
         }
@@ -134,16 +144,18 @@ impl HomeView {
                 Ok(document) => {
                     let url = document.url.clone().unwrap_or_default();
                     match this.submit(document, window, cx) {
-                        Ok(_) => this
-                            .set_status(true, tr!("Loaded %{url}", url = url.clone()).to_string()),
-                        Err(err) => {
-                            this.set_status(false, AppError::parse(err).message());
-                        }
+                        Ok(_) => this.set_status(
+                            true,
+                            tr!("Loaded %{url}", url = url.clone()).to_string(),
+                            cx,
+                        ),
+                        // submit already surfaced the failure as a notification.
+                        Err(_) => {}
                     }
                     cx.notify();
                 }
                 Err(e) => {
-                    this.set_status(false, e.message());
+                    this.set_status(false, e.message(), cx);
                     cx.notify();
                 }
             })
@@ -165,7 +177,7 @@ impl HomeView {
                 Ok(Ok(None)) => None,
                 Ok(Err(e)) => {
                     this.update(cx, |this, cx| {
-                        this.set_status(false, AppError::open_file(e).message());
+                        this.set_status(false, AppError::open_file(e).message(), cx);
                         cx.notify();
                     })
                     .ok();
@@ -179,10 +191,11 @@ impl HomeView {
             this.update_in(cx, |this, window, cx| {
                 match read_result {
                     Ok(document) => match this.submit(document, window, cx) {
-                        Ok(_) => this.set_status(true, tr!("File opened")),
-                        Err(err) => this.set_status(false, AppError::parse(err).message()),
+                        Ok(_) => this.set_status(true, tr!("File opened"), cx),
+                        // submit already surfaced the failure as a notification.
+                        Err(_) => {}
                     },
-                    Err(e) => this.set_status(false, e.message()),
+                    Err(e) => this.set_status(false, e.message(), cx),
                 }
                 cx.notify();
             })
@@ -219,39 +232,24 @@ impl LoadTarget for HomeView {
 
 impl Render for HomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
-        self.render_home(cx)
+        self.render_home(window, cx)
     }
 }
 
 impl HomeView {
-    /// OK-JSON-style home: a compact brand bar and the centered list of import
+    /// OK-JSON-style home: the app icon over the centered list of import
     /// actions. History is a sidebar of its own now (`⌘⇧H`), so this page stays
     /// about one thing — getting a document in.
-    fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        // ---- brand bar ----
+        // ---- brand ----
+        // The app icon, centered over the import list.
         let header = h_flex()
             .w_full()
-            .gap_2()
-            .items_center()
-            .child(
-                Icon::new(gpui_kit::assets::IconName::Braces)
-                    .with_size(gpui_kit::component::Size::Medium)
-                    .text_color(theme.primary),
-            )
-            .child(
-                div()
-                    .text_base()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("HJson"),
-            )
-            .child(h_flex().flex_1())
-            .child(chrome::stat(
-                tr!("Every document stays on this machine"),
-                cx,
-            ));
+            .justify_center()
+            .pb_2()
+            .child(img(app_icon()).size_24());
 
         // ---- import actions ----
         // The five ways in, as one centered vertical list of button-links. Every
@@ -269,43 +267,43 @@ impl HomeView {
                 "paste-clipboard",
                 SourceKind::Clipboard,
                 tr!("Paste JSON"),
-                "⌘⇧V",
+                chrome::kbd_hint(&PasteJson, "⌘⇧V", window, cx),
                 cx.listener(|this, _, window, cx| this.open_clipboard(window, cx)),
                 cx,
             ))
-            .child(chrome::divider(cx))
+            .child(Separator::horizontal())
             .child(action_row(
                 "open-url",
                 SourceKind::Url,
                 tr!("Fetch from URL"),
-                tr!("enter the address in a dialog"),
+                chrome::stat(tr!("enter the address in a dialog"), cx),
                 cx.listener(|this, _, window, cx| this.open_url_dialog(window, cx)),
                 cx,
             ))
-            .child(chrome::divider(cx))
+            .child(Separator::horizontal())
             .child(action_row(
                 "open-file",
                 SourceKind::File,
                 tr!("Open file"),
-                "⌘O",
+                chrome::kbd_hint(&OpenFile, "⌘O", window, cx),
                 cx.listener(|this, _, window, cx| this.pick_file(window, cx)),
                 cx,
             ))
-            .child(chrome::divider(cx))
+            .child(Separator::horizontal())
             .child(action_row(
                 "manual-input",
                 SourceKind::Manual,
                 tr!("Manual input"),
-                tr!("paste the JSON in a dialog"),
+                chrome::stat(tr!("paste the JSON in a dialog"), cx),
                 cx.listener(|this, _, window, cx| this.open_manual_dialog(window, cx)),
                 cx,
             ))
-            .child(chrome::divider(cx))
+            .child(Separator::horizontal())
             .child(action_row(
                 "open-sample",
                 SourceKind::Sample,
                 tr!("Sample document"),
-                tr!("built-in data"),
+                chrome::stat(tr!("built-in data"), cx),
                 cx.listener(|this, _, window, cx| this.open_sample(window, cx)),
                 cx,
             ));
@@ -373,12 +371,11 @@ fn action_row(
     id: &'static str,
     kind: SourceKind,
     label: impl Into<SharedString>,
-    hint: impl Into<SharedString>,
+    hint: AnyElement,
     on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &Context<HomeView>,
 ) -> AnyElement {
     let label = label.into();
-    let hint = hint.into();
     let theme = cx.theme();
     div()
         .id(id)
@@ -395,7 +392,20 @@ fn action_row(
                 .child(Icon::new(kind.icon()).small().text_color(kind.color(cx)))
                 .child(div().min_w_0().truncate().child(label))
                 .child(h_flex().flex_1())
-                .child(chrome::stat(hint, cx)),
+                .child(hint),
         )
         .into_any_element()
+}
+
+/// The app icon (resources/icon.svg), embedded so the home page renders the
+/// same mark regardless of where the binary runs from.
+fn app_icon() -> Arc<Image> {
+    static ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Svg,
+            include_bytes!("../../../resources/icon.svg").to_vec(),
+        ))
+    })
+    .clone()
 }

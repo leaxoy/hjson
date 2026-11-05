@@ -4,11 +4,17 @@
 //! in the header of the pane they act on. Their paddings and borders live here
 //! so the same kind of band reads the same height on every page.
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::empty::{
+    Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
+};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{ActiveTheme as _, h_flex, toolbar::Toolbar};
+use gpui_kit::component::{ActiveTheme as _, Icon, WindowExt as _, h_flex, toolbar::Toolbar};
 use gpui_kit::{
-    AnyElement, App, Div, FontWeight, IntoElement as _, ParentElement as _, SharedString,
-    Styled as _, div, px,
+    Action, AnyElement, App, AsKeystroke, Div, FontWeight, IntoElement as _, ParentElement as _,
+    SharedString, Styled as _, Window, div, px,
 };
 
 /// The thin band that heads a pane — title, stats, actions.
@@ -99,11 +105,66 @@ pub fn stat(text: impl Into<SharedString>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A hairline between rows of a stacked list, so the list reads as one card.
-pub fn divider(cx: &App) -> AnyElement {
-    div()
-        .w_full()
-        .h_px()
-        .bg(cx.theme().border)
-        .into_any_element()
+/// The standard empty state: a muted icon tile over a title (and an optional
+/// description), centered in the space it is given.
+pub fn empty_state(
+    icon: IconName,
+    title: impl Into<SharedString>,
+    description: Option<SharedString>,
+) -> AnyElement {
+    let mut header = EmptyHeader::new()
+        .media(
+            EmptyMedia::new()
+                .with_variant(EmptyMediaVariant::Icon)
+                .child(Icon::new(icon)),
+        )
+        .title(EmptyTitle::new().child(title.into()));
+    if let Some(description) = description {
+        header = header.description(EmptyDescription::new().child(description));
+    }
+    Empty::new().header(header).into_any_element()
+}
+
+/// A keycap showing the action's registered binding, falling back to plain
+/// text when the action has none.
+pub fn kbd_hint(action: &dyn Action, fallback: &str, window: &Window, cx: &App) -> AnyElement {
+    match Kbd::global_binding_for_action(action, window) {
+        Some(kbd) => kbd.into_any_element(),
+        None => stat(fallback, cx),
+    }
+}
+
+/// Failure feedback as a floating notification: a statusbar line is easy to
+/// miss, an error should not be (successes still go to the statusbar). Stays
+/// until dismissed. The app is single-window, so the first window is the one
+/// to notify on.
+///
+/// The push is deferred: several callers run inside `update_in`, i.e. with
+/// the window already mutably borrowed, and a nested `handle.update` would
+/// fail silently and swallow the notification.
+pub fn notify_failure(text: impl Into<String>, cx: &mut App) {
+    let text = text.into();
+    cx.defer(move |cx| {
+        let Some(&handle) = cx.windows().first() else {
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            window.push_notification(Notification::error(text).autohide(false), cx);
+        });
+    });
+}
+
+/// The " (⌘[)" tooltip suffix for an action, read from the live keymap so the
+/// text tracks the binding instead of hardcoding glyphs.
+pub fn shortcut_suffix(action: &dyn Action, window: &Window) -> String {
+    window
+        .highest_precedence_binding_for_action(action)
+        .and_then(|binding| {
+            binding
+                .keystrokes()
+                .first()
+                .map(|key| key.as_keystroke().clone())
+        })
+        .map(|key| format!(" ({})", Kbd::format(&key)))
+        .unwrap_or_default()
 }

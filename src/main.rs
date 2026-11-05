@@ -10,6 +10,12 @@ fn main() {
             // After settings: the menu bar shows a check mark read from them.
             hjson::app::menu::init(cx);
 
+            // Element inspector overlay (`cmd-alt-i` toggles it). Debug builds
+            // only — release never installs the renderer, so the shortcut and
+            // the overlay simply do not exist there.
+            #[cfg(debug_assertions)]
+            gpui_devtools::init(cx);
+
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

@@ -40,6 +40,7 @@ use gpui_kit::{
     size,
 };
 
+use crate::app::{CollapseAll, ExpandAll};
 use crate::components::chrome;
 use crate::components::json_text::{
     self, JsonTextGutter, JsonTextMode, JsonTextView, JsonTextViewProps,
@@ -457,10 +458,15 @@ impl DocView {
         .detach();
     }
 
-    /// Status toast under the toolbar. `ok` picks the color.
+    /// Success toasts stay in the statusbar; failures pop up as notifications.
     fn say(&mut self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.toast = Some(Status::from_parts(ok, text));
-        cx.notify();
+        let text = text.into();
+        if ok {
+            self.toast = Some(Status::from_parts(true, text));
+            cx.notify();
+        } else {
+            chrome::notify_failure(text, cx);
+        }
     }
 
     // ---------- reloading this document ----------
@@ -806,10 +812,7 @@ impl DocView {
     // ----- left: raw panel -----
 
     fn render_raw_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let (bg, muted) = {
-            let theme = cx.theme();
-            (theme.background, theme.muted_foreground)
-        };
+        let bg = cx.theme().background;
         let view = cx.entity();
         let wrap_raw_lines = crate::views::settings::settings(cx).wrap_raw_lines;
         if self.raw_wrap != wrap_raw_lines {
@@ -835,7 +838,6 @@ impl DocView {
                 crate::app::human_size(byte_size, cx),
             ],
             vec![
-                self.pane_mode_toggle(cx),
                 // The document's own controls, docked in the document's
                 // header: reload it (from its source or another one), and
                 // start a comparison with it on the A side.
@@ -985,15 +987,11 @@ impl DocView {
                     }),
             )
             .when(self.lines.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .text_color(muted)
-                        .text_sm()
-                        .child(tr!("Empty document")),
-                )
+                this.child(chrome::empty_state(
+                    IconName::FileText,
+                    tr!("Empty document"),
+                    None,
+                ))
             })
             .into_any_element()
     }
@@ -1104,26 +1102,33 @@ impl DocView {
                 )
             }],
             vec![
-                self.pane_mode_toggle(cx),
                 // The tree's own filter, in the tree's header: typing narrows
                 // this pane, nothing else on the page.
                 div()
                     .w(px(220.))
                     .min_w(px(120.))
-                    .child(Input::new(&self.search).small().cleanable(true))
+                    .child(Input::new(&self.search).small().cleanable(true).focus_bordered(false))
                     .into_any_element(),
                 Button::new("expand-all")
                     .icon(IconName::ChevronsUpDown)
                     .ghost()
                     .small()
-                    .tooltip(tr!("Expand all (⌘⇧E)"))
+                    .tooltip(format!(
+                        "{}{}",
+                        tr!("Expand all"),
+                        chrome::shortcut_suffix(&ExpandAll, window)
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| this.expand_all(cx)))
                     .into_any_element(),
                 Button::new("collapse-all")
                     .icon(IconName::ChevronsDownUp)
                     .ghost()
                     .small()
-                    .tooltip(tr!("Collapse all (⌘⇧C)"))
+                    .tooltip(format!(
+                        "{}{}",
+                        tr!("Collapse all"),
+                        chrome::shortcut_suffix(&CollapseAll, window)
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx)))
                     .into_any_element(),
             ],
@@ -1274,6 +1279,9 @@ impl DocView {
         chrome::status(cx)
             .left(left)
             .right(right)
+            // One mode toggle for the whole page, docked at the status bar's
+            // right edge instead of once per pane header.
+            .right(self.pane_mode_toggle(cx))
             .into_any_element()
     }
 }

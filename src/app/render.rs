@@ -12,9 +12,10 @@ use gpui_kit::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
+use crate::components::chrome;
 use crate::tr;
 
-use super::{HJsonApp, TabPage};
+use super::{CloseTab, DiffTab, HJsonApp, NewTab, TabPage, ToggleHistory};
 
 #[derive(Clone, Copy)]
 struct TabDrag {
@@ -40,7 +41,7 @@ impl HJsonApp {
     /// bar surface, the selected tab and its curves into the content all come
     /// from the same theme tokens as the rest of the chrome. The new-tab
     /// buttons dock at the right end.
-    fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn render_tab_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let app = cx.entity();
         let primary = cx.theme().primary;
 
@@ -77,7 +78,7 @@ impl HJsonApp {
                         cx.stop_propagation();
                         cancel.update(cx, |app, cx| app.cancel_title_edit(cx));
                     })
-                    .child(Input::new(&input).small().w_full())
+                    .child(Input::new(&input).small().w_full().focus_bordered(false))
                     .into_any_element()
             } else {
                 div().min_w_0().truncate().child(label).into_any_element()
@@ -119,7 +120,11 @@ impl HJsonApp {
                         .ghost()
                         .with_size(gpui_kit::component::Size::XSmall)
                         .mr_2()
-                        .tooltip(tr!("Close tab (⌘W)"))
+                        .tooltip(format!(
+                            "{}{}",
+                            tr!("Close tab"),
+                            chrome::shortcut_suffix(&CloseTab, window)
+                        ))
                         .on_click({
                             let app = app.clone();
                             move |_, _, cx| {
@@ -151,7 +156,11 @@ impl HJsonApp {
                         .selected(self.history_open)
                         .toggled(self.history_open)
                         .when(self.history_open, |b| b.text_color(primary))
-                        .tooltip(tr!("History (⌘⇧H)"))
+                        .tooltip(format!(
+                            "{}{}",
+                            tr!("History"),
+                            chrome::shortcut_suffix(&ToggleHistory, window)
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
                 ),
             )
@@ -171,7 +180,11 @@ impl HJsonApp {
                             .icon(gpui_kit::assets::IconName::GitCompare)
                             .ghost()
                             .small()
-                            .tooltip(tr!("New comparison (⌘D)"))
+                            .tooltip(format!(
+                                "{}{}",
+                                tr!("New comparison"),
+                                chrome::shortcut_suffix(&DiffTab, window)
+                            ))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.new_diff_tab(None, cx);
                             })),
@@ -181,7 +194,11 @@ impl HJsonApp {
                             .icon(gpui_kit::assets::IconName::Plus)
                             .ghost()
                             .small()
-                            .tooltip(tr!("New tab (⌘T)"))
+                            .tooltip(format!(
+                                "{}{}",
+                                tr!("New tab"),
+                                chrome::shortcut_suffix(&NewTab, window)
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.new_tab(window, cx);
                             })),
@@ -198,7 +215,7 @@ impl Render for HJsonApp {
         let ui_rem = crate::views::settings::settings(cx).ui_rem();
         window.set_rem_size(px(ui_rem));
 
-        let tab_bar = self.render_tab_bar(cx);
+        let tab_bar = self.render_tab_bar(window, cx);
         let content = match self.tabs.get(self.active) {
             Some(TabPage::Home(home)) => home.clone().into_any_element(),
             Some(TabPage::Doc(doc_view)) => doc_view.clone().into_any_element(),
@@ -208,23 +225,27 @@ impl Render for HJsonApp {
         let history = self.history_open.then(|| self.render_history_sidebar(cx));
         let theme = cx.theme();
 
-        v_flex()
+        // Sidebar first, so it runs the full window height and the tab bar
+        // sits to its right (Finder-style), instead of the tab bar spanning
+        // across the top of an open sidebar.
+        h_flex()
             .size_full()
+            // `items_stretch`, not `h_flex`'s default centering: the sidebar
+            // and the tab column fill the window height instead of floating
+            // at their intrinsic height.
+            .items_stretch()
             .overflow_hidden()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(tab_bar)
+            .children(history)
             .child(
-                // `items_stretch`, not `h_flex`'s default centering: the tab
-                // content fills its pane, and a cross-axis center would shrink
-                // the pane to its intrinsic height and float it mid-window.
-                h_flex()
+                v_flex()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
-                    .items_stretch()
                     .overflow_hidden()
-                    .children(history)
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(content)),
+                    .child(tab_bar)
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(content)),
             )
     }
 }

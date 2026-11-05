@@ -314,8 +314,9 @@ pub fn open_url_dialog<T: LoadTarget>(
             .child(
                 gpui_kit::component::v_flex()
                     .gap_2()
-                    .child(Input::new(&url_state))
-                    .child(Input::new(&title_state)),
+                    // No shadow focus ring — the blinking caret is enough.
+                    .child(Input::new(&url_state).focus_bordered(false))
+                    .child(Input::new(&title_state).focus_bordered(false)),
             )
             .on_ok(move |_, window, cx| {
                 let url = url_state.read(cx).value().trim().to_string();

@@ -5,6 +5,12 @@ edition = "2024"
 
 [dependencies]
 gpui-kit = "0.9.0"
+# Direct only to switch on the inspector hooks the devtools panel reads; the
+# crate itself is the same gpui-pre 0.3 gpui-kit already builds.
+gpui = { package = "gpui-pre", version = "0.3", features = ["inspector"] }
+# Inspector overlay (element picker, box model, styles). Initialized only in
+# debug builds — see main.rs.
+gpui-devtools = "0.5"
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "3", features = ["json"] }
 anyhow = "1"

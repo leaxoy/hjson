@@ -158,14 +158,20 @@ impl HJsonApp {
         cx.notify();
     }
 
-    /// Show a line on the active home tab, where the import errors belong.
+    /// Success notes stay on the home page's status line; failures pop up as
+    /// notifications so they cannot be missed.
     fn note_home(&self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        if !ok {
+            crate::components::chrome::notify_failure(text, cx);
+            return;
+        }
         let Some(TabPage::Home(home)) = self.tabs.get(self.active) else {
             return;
         };
         let home = home.clone();
         home.update(cx, |home, cx| {
-            home.set_status(ok, text);
+            home.set_status(ok, text, cx);
             cx.notify();
         });
     }

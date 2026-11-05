@@ -21,6 +21,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, size,
 };
 
+use crate::app::{DiffNext, DiffPrev};
 use crate::components::chrome;
 use crate::components::json_text::{
     JsonTextClickHandler, JsonTextGutter, JsonTextMarker, JsonTextMode, JsonTextView,
@@ -148,8 +149,6 @@ struct ResultPhase {
     /// Raw inputs (kind / title / url / text) per side — the toolbar's
     /// per-side reload menus swap one of these and re-run the diff.
     sources: [SideSource; 2],
-    /// Transient error surfaced in the toolbar after a failed reload.
-    note: Option<(SideIx, String)>,
     scroll_a: VirtualListScrollHandle,
     scroll_b: VirtualListScrollHandle,
     /// One row per entry in the difference list under the two columns.
@@ -288,7 +287,6 @@ impl ResultPhase {
             line_h,
             sides,
             sources,
-            note: None,
             scroll_a: VirtualListScrollHandle::new(),
             scroll_b: VirtualListScrollHandle::new(),
             entry_sizes: Rc::new(vec![size(px(640.), px(DIFF_ROW_H)); entry_count]),
@@ -311,6 +309,16 @@ impl DiffView {
             [other, source]
         };
         self.start_diff(sources, line_h, cx);
+    }
+
+    /// Swap the two sides and re-run the comparison with A and B exchanged.
+    fn swap_sides(&mut self, cx: &mut Context<Self>) {
+        let (line_h, sources) = match &self.phase {
+            DiffPhase::Result(res) => (res.line_h, res.sources.clone()),
+            _ => return,
+        };
+        let [a, b] = sources;
+        self.start_diff([b, a], line_h, cx);
     }
 
     fn start_diff(&mut self, sources: [SideSource; 2], line_h: f32, cx: &mut Context<Self>) {
@@ -355,8 +363,8 @@ impl DiffView {
         }
     }
 
-    /// Surface a message for one side. The result page has room for errors
-    /// only; the config page shows both kinds next to its cards.
+    /// Success notes stay inline under the side card; failures pop up as
+    /// notifications so they cannot be missed.
     fn note_side(
         &mut self,
         side: SideIx,
@@ -364,16 +372,19 @@ impl DiffView {
         text: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        match &mut self.phase {
-            DiffPhase::Config(cfg) => {
-                cfg.sides[side].note = Some(Status::from_parts(ok, text));
+        let text = text.into();
+        if ok {
+            if let DiffPhase::Config(cfg) = &mut self.phase {
+                cfg.sides[side].note = Some(Status::from_parts(true, text));
                 cfg.sides[side].busy = false;
             }
-            DiffPhase::Result(res) => {
-                res.note = (!ok).then(|| (side, text.into()));
+            cx.notify();
+        } else {
+            if let DiffPhase::Config(cfg) = &mut self.phase {
+                cfg.sides[side].busy = false;
             }
+            chrome::notify_failure(text, cx);
         }
-        cx.notify();
     }
 
     /// Replace one side with the clipboard contents.
@@ -786,20 +797,13 @@ impl DiffView {
 
         if title.is_none() {
             return card
-                .child(
-                    div()
-                        .w_full()
-                        .min_h(px(110.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(tr!("Use Load in the top-right: paste / open file / fetch URL / pick from history")),
-                )
+                .child(chrome::empty_state(
+                    IconName::Download,
+                    tr!("Nothing yet"),
+                    Some(tr!(
+                        "Use Load in the top-right: paste / open file / fetch URL / pick from history"
+                    )),
+                ))
                 .into_any_element();
         }
 
@@ -929,7 +933,7 @@ impl DiffView {
 
         // No shared title bar: each column header reloads its own side and the
         // status bar carries the summary, the error note, and the navigation.
-        let status = self.render_status(cx);
+        let status = self.render_status(window, cx);
 
         // Differences get their own strip under the columns — the whole change
         // set in one place, instead of hunting for the gutter marks line by line.
@@ -1231,15 +1235,11 @@ impl DiffView {
                     .vertical_scrollbar(scroll),
             )
             .when(lines_empty, |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .text_color(muted)
-                        .text_sm()
-                        .child(tr!("Empty document")),
-                )
+                this.child(chrome::empty_state(
+                    IconName::FileText,
+                    tr!("Empty document"),
+                    None,
+                ))
             })
             .into_any_element()
     }
@@ -1323,11 +1323,11 @@ impl DiffView {
             .collect()
     }
 
-    fn render_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_status(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, danger, success) = (theme.muted_foreground, theme.danger, theme.success);
         let mono = crate::views::settings::settings(cx).mono_family(cx);
-        let (entry, counts, total, current, note) = {
+        let (entry, counts, total, current) = {
             let res = self.result_ref();
             let counts = if res.entries.is_empty() {
                 String::new()
@@ -1357,7 +1357,6 @@ impl DiffView {
                 counts,
                 res.entries.len(),
                 res.current,
-                res.note.clone(),
             )
         };
         let nav = if total == 0 {
@@ -1452,23 +1451,6 @@ impl DiffView {
         };
 
         let mut status = chrome::status(cx).left(left);
-        if let Some((side, text)) = note {
-            let side_label = if side == SIDE_A {
-                tr!("Side A")
-            } else {
-                tr!("Side B")
-            };
-            status = status.left(
-                div().text_xs().flex_shrink_0().text_color(danger).child(
-                    tr!(
-                        "%{side} · %{text}",
-                        side = side_label.to_string(),
-                        text = text
-                    )
-                    .to_string(),
-                ),
-            );
-        }
 
         status = status
             .right(right)
@@ -1491,18 +1473,34 @@ impl DiffView {
                         Button::new("prev-diff")
                             .icon(IconName::ChevronUp)
                             .small()
-                            .tooltip(tr!("Previous change (⌘[)"))
+                            .tooltip(format!(
+                                "{}{}",
+                                tr!("Previous change"),
+                                chrome::shortcut_suffix(&DiffPrev, window)
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| this.jump(-1, cx))),
                     )
                     .child(
                         Button::new("next-diff")
                             .icon(IconName::ChevronDown)
                             .small()
-                            .tooltip(tr!("Next change (⌘])"))
+                            .tooltip(format!(
+                                "{}{}",
+                                tr!("Next change"),
+                                chrome::shortcut_suffix(&DiffNext, window)
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| this.jump(1, cx))),
                     ),
             );
         }
+
+        status = status.right(
+            Button::new("swap-sides")
+                .icon(IconName::ArrowLeftRight)
+                .small()
+                .tooltip(tr!("Swap sides (A ⇆ B)"))
+                .on_click(cx.listener(|this, _, _, cx| this.swap_sides(cx))),
+        );
 
         status.into_any_element()
     }
