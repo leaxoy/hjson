@@ -8,6 +8,9 @@ gpui_kit::actions!(
     hjson,
     [
         PasteJson,
+        FetchUrl,
+        ManualInput,
+        OpenSample,
         NewTab,
         CloseTab,
         SelectNextTab,
@@ -91,8 +94,8 @@ fn active_app(cx: &gpui_kit::App) -> Option<WeakEntity<HJsonApp>> {
 }
 
 /// Global key bindings + menu actions. `cmd-t` opens a new tab (import page),
-/// `cmd-w` closes the active one, `cmd-o` opens a file, `cmd-shift-v` imports
-/// the clipboard content, mirroring OK JSON's paste flow, `cmd-shift-h`
+/// `cmd-w` closes the active one, the Home page import shortcuts load JSON
+/// from clipboard / URL / file / manual input / sample data, `cmd-shift-h`
 /// toggles the history sidebar, `cmd-1` … `cmd-9` select tabs, `cmd-=`, `cmd--`
 /// and `cmd-0` control page scale, `cmd-ctrl-f` toggles fullscreen, `cmd-f`
 /// filters the tree, `cmd-shift-e` / `cmd-shift-c` expand and collapse it, and
@@ -113,6 +116,18 @@ pub fn init(cx: &mut gpui_kit::App) {
         KeyBinding::new("cmd-o", OpenFile, None),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-o", OpenFile, None),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-l", FetchUrl, None),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-l", FetchUrl, None),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-i", ManualInput, None),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-i", ManualInput, None),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-s", OpenSample, None),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-s", OpenSample, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-t", NewTab, None),
         #[cfg(not(target_os = "macos"))]
@@ -209,6 +224,9 @@ pub fn init(cx: &mut gpui_kit::App) {
 
     window_action::<PasteJson>(cx, |app, window, cx| app.open_clipboard(window, cx));
     window_action::<OpenFile>(cx, |app, window, cx| app.open_file(window, cx));
+    window_action::<FetchUrl>(cx, |app, window, cx| app.open_url_dialog(window, cx));
+    window_action::<ManualInput>(cx, |app, window, cx| app.open_manual_dialog(window, cx));
+    window_action::<OpenSample>(cx, |app, window, cx| app.open_sample(window, cx));
     window_action::<NewTab>(cx, |app, window, cx| app.new_tab(window, cx));
     window_action::<DiffTab>(cx, |app, _window, cx| app.new_diff_tab(None, cx));
     window_action::<CloseTab>(cx, |app, _window, cx| app.close_active_tab(cx));

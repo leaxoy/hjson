@@ -1,4 +1,4 @@
-use super::{HJsonApp, OpenFile, PasteJson};
+use super::{FetchUrl, HJsonApp, ManualInput, OpenFile, OpenSample, PasteJson};
 use crate::components::chrome;
 use crate::components::source_menu::{LoadMethod, LoadTarget, open_manual_dialog, open_url_dialog};
 use crate::document::{self, LoadedDocument, SourceKind};
@@ -276,7 +276,7 @@ impl HomeView {
                 "open-url",
                 SourceKind::Url,
                 tr!("Fetch from URL"),
-                chrome::stat(tr!("enter the address in a dialog"), cx),
+                chrome::kbd_hint(&FetchUrl, "⌘L", window, cx),
                 cx.listener(|this, _, window, cx| this.open_url_dialog(window, cx)),
                 cx,
             ))
@@ -294,7 +294,7 @@ impl HomeView {
                 "manual-input",
                 SourceKind::Manual,
                 tr!("Manual input"),
-                chrome::stat(tr!("paste the JSON in a dialog"), cx),
+                chrome::kbd_hint(&ManualInput, "⌘I", window, cx),
                 cx.listener(|this, _, window, cx| this.open_manual_dialog(window, cx)),
                 cx,
             ))
@@ -303,7 +303,7 @@ impl HomeView {
                 "open-sample",
                 SourceKind::Sample,
                 tr!("Sample document"),
-                chrome::stat(tr!("built-in data"), cx),
+                chrome::kbd_hint(&OpenSample, "⌘⇧S", window, cx),
                 cx.listener(|this, _, window, cx| this.open_sample(window, cx)),
                 cx,
             ));

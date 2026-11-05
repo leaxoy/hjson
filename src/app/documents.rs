@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{AppContext as _, Context, Entity, SharedString, Window};
 
+use crate::components::source_menu::{open_manual_dialog, open_url_dialog};
 use crate::document::SourceKind;
 use crate::document::{self, LoadedDocument};
 use crate::json_model::JsonTree;
@@ -204,6 +205,32 @@ impl HJsonApp {
             .ok();
         })
         .detach();
+    }
+
+    pub fn open_url_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(TabPage::Home(home)) = self.tabs.get(self.active) else {
+            return;
+        };
+        let target = home.downgrade();
+        open_url_dialog(&target, (), None, window, cx);
+    }
+
+    pub fn open_manual_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(TabPage::Home(home)) = self.tabs.get(self.active) else {
+            return;
+        };
+        let target = home.downgrade();
+        open_manual_dialog(&target, (), window, cx);
+    }
+
+    pub fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match document::from_sample() {
+            Ok(document) => {
+                self.open_document(document, window, cx);
+            }
+            Err(err) => self.note_home(false, err.message(), cx),
+        }
+        cx.notify();
     }
 
     pub fn open_doc(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {

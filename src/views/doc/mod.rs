@@ -56,6 +56,7 @@ use crate::json_model::{JsonTree, JsonType};
 use crate::syntax::{Span, highlight};
 
 const TREE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
+const TOAST_DURATION: Duration = Duration::from_secs(3);
 
 // `tab` in one of the two panes: the keyboard moves to the other one.
 gpui_kit::actions!(hjson, [NextPane]);
@@ -158,6 +159,7 @@ pub struct DocView {
     query: Option<String>,
     match_count: usize,
     toast: Option<Status>,
+    toast_generation: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -231,6 +233,7 @@ impl DocView {
             query: None,
             match_count: 0,
             toast: None,
+            toast_generation: 0,
             _subs: vec![search_sub],
         }
     }
@@ -462,8 +465,20 @@ impl DocView {
     fn say(&mut self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
         let text = text.into();
         if ok {
+            self.toast_generation = self.toast_generation.wrapping_add(1);
+            let toast_generation = self.toast_generation;
             self.toast = Some(Status::from_parts(true, text));
             cx.notify();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TOAST_DURATION).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.toast_generation == toast_generation {
+                        this.toast = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         } else {
             chrome::notify_failure(text, cx);
         }
@@ -843,7 +858,6 @@ impl DocView {
                 // start a comparison with it on the A side.
                 source_menu::header_load_button(
                     "reload-doc",
-                    IconName::RefreshCw,
                     tr!("Reload this document from its source, or switch to another"),
                     (),
                     LoadOptions {
@@ -1107,7 +1121,12 @@ impl DocView {
                 div()
                     .w(px(220.))
                     .min_w(px(120.))
-                    .child(Input::new(&self.search).small().cleanable(true).focus_bordered(false))
+                    .child(
+                        Input::new(&self.search)
+                            .small()
+                            .cleanable(true)
+                            .focus_bordered(false),
+                    )
                     .into_any_element(),
                 Button::new("expand-all")
                     .icon(IconName::ChevronsUpDown)

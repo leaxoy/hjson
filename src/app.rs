@@ -13,8 +13,9 @@ mod tabs;
 
 pub(crate) use actions::refresh_doc_view_key_sort;
 pub use actions::{
-    CloseTab, CollapseAll, DiffNext, DiffPrev, DiffTab, ExpandAll, FindInDoc, NewTab, OpenFile,
-    PasteJson, SelectNextTab, SelectPrevTab, ToggleHistory, init,
+    CloseTab, CollapseAll, DiffNext, DiffPrev, DiffTab, ExpandAll, FetchUrl, FindInDoc,
+    ManualInput, NewTab, OpenFile, OpenSample, PasteJson, SelectNextTab, SelectPrevTab,
+    ToggleHistory, init,
 };
 pub use documents::DocEntry;
 pub use history::human_size;

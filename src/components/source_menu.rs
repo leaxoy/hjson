@@ -129,18 +129,17 @@ pub fn prepared_doc_of(
 
 /// The one load control a header uses: an icon button whose menu holds every
 /// source, wired to one slot of the page. Header bands are narrow, so the
-/// button wears no label — the glyph says whether it loads (Download) or
-/// reloads (RefreshCw), and the tooltip carries the rest.
+/// button wears no label; every caller gets the same JSON-document glyph and
+/// the tooltip carries the page-specific context.
 pub fn header_load_button<T: LoadTarget>(
     id: impl Into<gpui_kit::ElementId>,
-    icon: IconName,
     tooltip: impl Into<SharedString>,
     slot: T::Slot,
     opts: LoadOptions,
     target: WeakEntity<T>,
 ) -> gpui_kit::AnyElement {
     Button::new(id)
-        .icon(icon)
+        .icon(IconName::FileBraces)
         .ghost()
         .small()
         .tooltip(tooltip)

@@ -135,9 +135,9 @@ pub fn kbd_hint(action: &dyn Action, fallback: &str, window: &Window, cx: &App) 
 }
 
 /// Failure feedback as a floating notification: a statusbar line is easy to
-/// miss, an error should not be (successes still go to the statusbar). Stays
-/// until dismissed. The app is single-window, so the first window is the one
-/// to notify on.
+/// miss, an error should not be (successes still go to the statusbar). Uses
+/// gpui-kit's default autohide duration. The app is single-window, so the first
+/// window is the one to notify on.
 ///
 /// The push is deferred: several callers run inside `update_in`, i.e. with
 /// the window already mutably borrowed, and a nested `handle.update` would
@@ -149,7 +149,7 @@ pub fn notify_failure(text: impl Into<String>, cx: &mut App) {
             return;
         };
         let _ = handle.update(cx, |_, window, cx| {
-            window.push_notification(Notification::error(text).autohide(false), cx);
+            window.push_notification(Notification::error(text), cx);
         });
     });
 }

@@ -7,7 +7,10 @@ use crate::syntax::{self, SyntaxMode};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::theme::ThemeColor;
 use gpui_kit::component::{
+    Disableable as _, Sizable as _,
+    button::Button,
     h_flex,
+    menu::{DropdownMenu, PopupMenuItem},
     setting::{
         AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
         Settings as SettingsView,
@@ -15,11 +18,11 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, Context, IntoElement, ParentElement as _, Render, RenderOnce, SharedString,
-    Styled as _, Window, div, px,
+    Anchor, AnyElement, App, Context, IntoElement, ParentElement as _, Render, RenderOnce,
+    SharedString, Styled as _, Window, div, px,
 };
 use rust_i18n::t;
-use std::borrow::Cow;
+use std::{borrow::Cow, rc::Rc};
 
 gpui_kit::actions!(hjson, [OpenSettings, Quit, ToggleLineNumbers]);
 
@@ -35,6 +38,10 @@ pub use runtime::{
 pub(crate) const SETTINGS_DIALOG_W: f32 = 620.0;
 pub(crate) const SETTINGS_DIALOG_H: f32 = 560.0;
 const SETTINGS_SIDEBAR_W: f32 = 180.0;
+const SETTINGS_DIALOG_PADDING_X: f32 = 32.0;
+const SETTINGS_PAGE_PADDING_X: f32 = 32.0;
+const SETTINGS_DROPDOWN_W: f32 =
+    SETTINGS_DIALOG_W - SETTINGS_DIALOG_PADDING_X - SETTINGS_SIDEBAR_W - SETTINGS_PAGE_PADDING_X;
 
 pub(crate) struct SettingsHub;
 
@@ -68,10 +75,11 @@ impl SettingsHub {
         set_value: impl Fn(SharedString, &mut App) + 'static,
         default: SharedString,
     ) -> SettingItem {
+        let field_title = SharedString::from(title.as_ref());
         Self::item(
             title,
             description,
-            SettingField::dropdown(options, value, set_value).default_value(default),
+            Self::dropdown_field(field_title, options, value, set_value, default, false),
         )
     }
 
@@ -83,10 +91,81 @@ impl SettingsHub {
         set_value: impl Fn(SharedString, &mut App) + 'static,
         default: SharedString,
     ) -> SettingItem {
+        let field_title = SharedString::from(title.as_ref());
         Self::item(
             title,
             description,
-            SettingField::scrollable_dropdown(options, value, set_value).default_value(default),
+            Self::dropdown_field(field_title, options, value, set_value, default, true),
+        )
+    }
+
+    fn dropdown_field(
+        title: SharedString,
+        options: Vec<(SharedString, SharedString)>,
+        value: impl Fn(&App) -> SharedString + 'static,
+        set_value: impl Fn(SharedString, &mut App) + 'static,
+        default: SharedString,
+        scrollable: bool,
+    ) -> SettingField<SharedString> {
+        let value = Rc::new(value);
+        let set_value = Rc::new(set_value);
+        let width = px(SETTINGS_DROPDOWN_W);
+
+        SettingField::<SharedString>::render({
+            let value = value.clone();
+            let set_value = set_value.clone();
+            let title = title.clone();
+            move |render_options, _, cx| {
+                let current_value = value(cx);
+                let current_label = options
+                    .iter()
+                    .find(|(value, _)| value == &current_value)
+                    .map(|(_, label)| label.clone())
+                    .unwrap_or_else(|| current_value.clone());
+                let selected_value = current_value.clone();
+                let menu_options = options.clone();
+                let set_value = set_value.clone();
+
+                Button::new("btn")
+                    .w(width)
+                    .accessibility_label(format!("{}: {}", title, current_label))
+                    .label(current_label)
+                    .dropdown_caret(true)
+                    .outline()
+                    .disabled(render_options.is_disabled())
+                    .with_size(render_options.size())
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        let set_value = set_value.clone();
+                        let menu = menu_options.iter().fold(menu, |menu, (value, label)| {
+                            let checked = value == &selected_value;
+                            menu.item(PopupMenuItem::new(label.clone()).checked(checked).on_click(
+                                {
+                                    let value = value.clone();
+                                    let set_value = set_value.clone();
+                                    move |_, _, cx| {
+                                        set_value(value.clone(), cx);
+                                    }
+                                },
+                            ))
+                        });
+
+                        menu.min_w(width).max_w(width).scrollable(scrollable)
+                    })
+                    .into_any_element()
+            }
+        })
+        .on_reset(
+            {
+                let value = value.clone();
+                let default = default.clone();
+                move |cx| value(cx) != default
+            },
+            {
+                let set_value = set_value.clone();
+                move |_, cx| {
+                    set_value(default.clone(), cx);
+                }
+            },
         )
     }
 

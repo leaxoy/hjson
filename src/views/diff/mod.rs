@@ -631,8 +631,8 @@ impl DiffView {
 
     /// The side's one load control, docked in that side's titlebar — the same
     /// shape as a document's own header: an icon button whose menu holds every
-    /// source. Download when the side is still empty, RefreshCw once it holds
-    /// something, because then it replaces what is there.
+    /// source. The shared load button owns the glyph, so all JSON-loading
+    /// surfaces look the same.
     fn side_load_button(&self, side: SideIx, cx: &mut Context<Self>) -> AnyElement {
         let (kind, title, filled) = match &self.phase {
             DiffPhase::Config(cfg) => (
@@ -654,14 +654,9 @@ impl DiffView {
         } else {
             tr!("Side B")
         };
-        let (icon, verb) = if filled {
-            (IconName::RefreshCw, tr!("Reload"))
-        } else {
-            (IconName::Download, tr!("Load"))
-        };
+        let verb = if filled { tr!("Reload") } else { tr!("Load") };
         crate::components::source_menu::header_load_button(
             SharedString::from(format!("load-{side}")),
-            icon,
             tr!(
                 "%{verb} %{side} (current: %{title} · %{kind})",
                 verb = verb.to_string(),
