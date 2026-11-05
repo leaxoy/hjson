@@ -1,7 +1,7 @@
 /// Built-in sample shown on the home page, exercising every JSON type.
 pub const TEXT: &str = r##"{
   "name": "hjson-viewer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "repository": null,
   "keywords": ["json", "viewer", "gpui", "rust"],
