@@ -1,7 +1,4 @@
-use self::model::{
-    APPEARANCE_OPTIONS, JSON_SIZE_MAX, JSON_SIZE_MIN, UI_SIZE_MAX, UI_SIZE_MIN,
-    appearance_from_key, appearance_key, appearance_label,
-};
+use self::model::Appearance;
 use crate::i18n::Language;
 use crate::syntax::{self, SyntaxMode};
 use gpui_kit::assets::IconName;
@@ -26,14 +23,13 @@ use std::{borrow::Cow, rc::Rc};
 
 gpui_kit::actions!(hjson, [OpenSettings, Quit, ToggleLineNumbers]);
 
-pub(crate) mod model;
-pub(crate) mod runtime;
+mod codec;
+mod model;
+mod runtime;
 
-pub use model::{Settings, follow_theme_label};
-pub use runtime::{
-    apply_appearance, init, mono_font_options, reset_zoom, settings, update_settings, zoom_in,
-    zoom_out,
-};
+pub(crate) use model::Settings;
+pub use runtime::{apply_appearance, init};
+pub(crate) use runtime::{reset_zoom, settings, update_settings, zoom_in, zoom_out};
 
 pub(crate) const SETTINGS_DIALOG_W: f32 = 620.0;
 pub(crate) const SETTINGS_DIALOG_H: f32 = 560.0;
@@ -224,22 +220,22 @@ impl SettingsHub {
                         t!("settings.appearance"),
                         t!("settings.appearance_desc"),
                         Self::appearance_options(),
-                        |cx| SharedString::from(appearance_key(settings(cx).appearance)),
+                        |cx| SharedString::from(settings(cx).appearance.key()),
                         |value, cx| {
-                            if let Some(appearance) = appearance_from_key(value.as_ref()) {
+                            if let Some(appearance) = Appearance::from_key(value.as_ref()) {
                                 update_settings(cx, |s| s.appearance = appearance);
                             }
                         },
-                        SharedString::from(appearance_key(Settings::default().appearance)),
+                        SharedString::from(Settings::default().appearance.key()),
                     ))
                     .item(Self::number(
                         t!("settings.ui_font_size"),
                         t!("settings.ui_font_size_desc"),
-                        (UI_SIZE_MIN, UI_SIZE_MAX),
+                        Settings::UI_FONT_SIZE_RANGE,
                         |cx| settings(cx).ui_font_size as f64,
                         |value, cx| {
                             update_settings(cx, |s| {
-                                s.ui_font_size = (value as f32).clamp(UI_SIZE_MIN, UI_SIZE_MAX)
+                                s.ui_font_size = Settings::clamp_ui_font_size(value as f32)
                             });
                         },
                         Settings::default().ui_font_size as f64,
@@ -256,21 +252,21 @@ impl SettingsHub {
                         t!("settings.font"),
                         t!("settings.font_desc"),
                         Self::mono_font_dropdown_options(cx),
-                        |cx| settings(cx).mono_font.clone().unwrap_or_default(),
+                        |cx| settings(cx).font_family.clone().unwrap_or_default(),
                         |value, cx| {
-                            let mono_font = (!value.is_empty()).then_some(value);
-                            update_settings(cx, |s| s.mono_font = mono_font);
+                            let font_family = (!value.is_empty()).then_some(value);
+                            update_settings(cx, |s| s.font_family = font_family);
                         },
                         SharedString::default(),
                     ))
                     .item(Self::number(
                         t!("settings.font_size"),
                         t!("settings.font_size_desc"),
-                        (JSON_SIZE_MIN, JSON_SIZE_MAX),
+                        Settings::FONT_SIZE_RANGE,
                         |cx| settings(cx).font_size as f64,
                         |value, cx| {
                             update_settings(cx, |s| {
-                                s.font_size = (value as f32).clamp(JSON_SIZE_MIN, JSON_SIZE_MAX)
+                                s.font_size = Settings::clamp_font_size(value as f32)
                             });
                         },
                         Settings::default().font_size as f64,
@@ -347,19 +343,24 @@ impl SettingsHub {
     }
 
     fn appearance_options() -> Vec<(SharedString, SharedString)> {
-        APPEARANCE_OPTIONS
+        Appearance::ALL
             .into_iter()
             .map(|appearance| {
+                let label = match appearance {
+                    Appearance::System => t!("settings.mode_system"),
+                    Appearance::Light => t!("settings.mode_light"),
+                    Appearance::Dark => t!("settings.mode_dark"),
+                };
                 (
-                    SharedString::from(appearance_key(appearance)),
-                    SharedString::from(appearance_label(appearance)),
+                    SharedString::from(appearance.key()),
+                    SharedString::from(label.as_ref()),
                 )
             })
             .collect()
     }
 
     fn mono_font_dropdown_options(cx: &App) -> Vec<(SharedString, SharedString)> {
-        mono_font_options(cx)
+        runtime::mono_font_options(cx)
             .into_iter()
             .enumerate()
             .map(|(ix, label)| {
@@ -455,5 +456,37 @@ impl SettingsHub {
             )
             .child(div().text_color(value_color).child(value.to_string()))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_i18n::t;
+
+    #[test]
+    fn labels_are_translated() {
+        assert_eq!(t!("settings.mode_system", locale = "en"), "Follow system");
+        assert_eq!(t!("settings.mode_light", locale = "en"), "Light");
+        assert_eq!(t!("settings.mode_dark", locale = "en"), "Dark");
+        assert_eq!(
+            t!("settings.font_follow_system", locale = "en"),
+            "Follow system (monospace)"
+        );
+    }
+
+    #[test]
+    fn chinese_labels_differ_from_english() {
+        assert_ne!(
+            t!("settings.mode_dark", locale = "en"),
+            t!("settings.mode_dark", locale = "zh")
+        );
+        assert_ne!(
+            t!("settings.tab_preview", locale = "en"),
+            t!("settings.tab_preview", locale = "zh")
+        );
+        assert_ne!(
+            t!("settings.font_follow_system", locale = "en"),
+            t!("settings.font_follow_system", locale = "zh")
+        );
     }
 }

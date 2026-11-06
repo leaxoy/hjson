@@ -13,6 +13,7 @@ gpui = { package = "gpui-pre", version = "0.3", features = ["inspector"] }
 # debug builds — see main.rs.
 gpui-devtools = "0.5"
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.11" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 # Settings persistence.

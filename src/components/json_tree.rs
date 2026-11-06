@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn tree_sorts_object_keys_and_preserves_array_indices() {
-        let doc = JsonTree::parse(r#"{"z":0,"items":[{"b":2,"a":1},3],"a":1}"#);
+        let doc = JsonTree::parse(r#"{"z":0,"items":[{"b":2,"a":1},3],"a":1}"#).unwrap();
         let (rows, _) = build_tree_rows(&doc, None, &all_containers(&doc), true);
 
         let root_keys = rows
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn tree_preserves_object_order_when_sorting_is_disabled() {
-        let doc = JsonTree::parse(r#"{"z":0,"a":1}"#);
+        let doc = JsonTree::parse(r#"{"z":0,"a":1}"#).unwrap();
         let (rows, _) = build_tree_rows(&doc, None, &all_containers(&doc), false);
         let root_keys = rows
             .iter()
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn collapsed_tree_keeps_root_and_first_level_visible() {
-        let doc = JsonTree::parse(r#"{"a":1,"nested":{"b":2}}"#);
+        let doc = JsonTree::parse(r#"{"a":1,"nested":{"b":2}}"#).unwrap();
         let expanded = HashSet::from([0]);
         let (rows, _) = build_tree_rows(&doc, None, &expanded, true);
         let ids = rows.iter().map(|row| row.node_id).collect::<Vec<_>>();
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn tree_filter_keeps_matching_ancestors() {
-        let doc = JsonTree::parse(r#"{"a":1,"nested":{"target":"value","other":2}}"#);
+        let doc = JsonTree::parse(r#"{"a":1,"nested":{"target":"value","other":2}}"#).unwrap();
         let expanded = HashSet::from([0]);
         let (rows, hits) = build_tree_rows(&doc, Some("target"), &expanded, true);
         let keys = rows

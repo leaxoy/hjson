@@ -106,6 +106,13 @@ pub(crate) trait LoadTarget: Sized + 'static {
 
 /// One entry of the session import history.
 pub(crate) type HistoryItem = (u64, SharedString, SourceKind);
+type PreparedDoc = (
+    SourceKind,
+    SharedString,
+    String,
+    Option<String>,
+    Option<Arc<JsonTree>>,
+);
 
 /// What a menu can offer at the moment it opens.
 #[derive(Clone)]
@@ -133,13 +140,7 @@ pub(crate) fn prepared_doc_of(
     app: &WeakEntity<HJsonApp>,
     cx: &gpui_kit::App,
     id: u64,
-) -> Option<(
-    SourceKind,
-    SharedString,
-    String,
-    Option<String>,
-    Option<Arc<JsonTree>>,
-)> {
+) -> Option<PreparedDoc> {
     let app = app.upgrade()?;
     let entry = app.read(cx).docs.iter().find(|d| d.id == id)?;
     Some((
@@ -277,7 +278,7 @@ fn load_url<T: LoadTarget>(
     cx.notify();
 
     let http_client = {
-        let app: &gpui_kit::App = (&*cx).borrow();
+        let app: &gpui_kit::App = (*cx).borrow();
         app.http_client()
     };
     let task =

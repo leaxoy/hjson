@@ -1,8 +1,8 @@
-use super::model::{Settings, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, appearance_key, follow_theme_label};
+use super::model::{Appearance, Settings};
 use super::{
     OpenSettings, Quit, SETTINGS_DIALOG_H, SETTINGS_DIALOG_W, SettingsHub, ToggleLineNumbers,
 };
-use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
+use gpui_kit::component::{Theme, WindowExt as _};
 use gpui_kit::{
     App, AppContext as _, Entity, Global, KeyBinding, ParentElement as _, SharedString,
     Styled as _, Window, WindowAppearance, px,
@@ -15,12 +15,12 @@ const MONO_PROBE_CHARS: [char; 4] = ['M', 'W', 'X', 'i'];
 /// The size they are measured at, in px.
 const MONO_PROBE_SIZE: f32 = 16.0;
 
-pub fn settings(cx: &App) -> &Settings {
+pub(crate) fn settings(cx: &App) -> &Settings {
     cx.global::<Settings>()
 }
 
 /// Mutate settings, repaint every window, and persist to the config file.
-pub fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
+pub(crate) fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     let old_line_numbers = settings(cx).line_numbers;
     let old_sort_object_keys = settings(cx).sort_object_keys;
     let old_appearance = settings(cx).appearance;
@@ -54,19 +54,15 @@ pub fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
 
 /// Step the interface zoom, in and out. The two base sizes stay untouched, so
 /// the settings dialog keeps showing what was chosen there.
-pub fn zoom_in(cx: &mut App) {
-    update_settings(cx, |s| {
-        s.zoom = (s.zoom * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX)
-    });
+pub(crate) fn zoom_in(cx: &mut App) {
+    update_settings(cx, Settings::zoom_in);
 }
 
-pub fn zoom_out(cx: &mut App) {
-    update_settings(cx, |s| {
-        s.zoom = (s.zoom / ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX)
-    });
+pub(crate) fn zoom_out(cx: &mut App) {
+    update_settings(cx, Settings::zoom_out);
 }
 
-pub fn reset_zoom(cx: &mut App) {
+pub(crate) fn reset_zoom(cx: &mut App) {
     update_settings(cx, |s| s.zoom = 1.0);
 }
 
@@ -76,12 +72,12 @@ pub fn reset_zoom(cx: &mut App) {
 /// be read; see [`Theme::sync_system_appearance`].
 pub fn apply_appearance(window: Option<&mut Window>, cx: &mut App) {
     match settings(cx).appearance {
-        None => {
+        Appearance::System => {
             cx.set_window_appearance(None);
             Theme::sync_system_appearance(window, cx);
         }
-        Some(ThemeMode::Light) => force_appearance(WindowAppearance::Light, cx),
-        Some(ThemeMode::Dark) => force_appearance(WindowAppearance::Dark, cx),
+        Appearance::Light => force_appearance(WindowAppearance::Light, cx),
+        Appearance::Dark => force_appearance(WindowAppearance::Dark, cx),
     }
 }
 
@@ -104,19 +100,21 @@ impl Global for MonoFamilies {}
 
 /// Every installed font family that shapes ASCII with equal per-glyph advances
 /// (i.e. real monospace fonts), behind the pseudo entry in
-/// [`follow_theme_label`].
+/// the translated "follow system" entry.
 ///
 /// The probe is a few hundred milliseconds of text work, so [`init`] runs it in
 /// the background and this reads the cache. Opening the dialog before the probe
 /// lands pays for it inline instead.
-pub fn mono_font_options(cx: &App) -> Vec<SharedString> {
+pub(super) fn mono_font_options(cx: &App) -> Vec<SharedString> {
     // The background probe has normally landed long before a dialog can open.
     // Until it has, pay for it here rather than show a half-filled dropdown.
     let families = match cx.try_global::<MonoFamilies>() {
         Some(MonoFamilies(Some(families))) => families.clone(),
         _ => probe_mono_families(cx.text_system()),
     };
-    let mut out = vec![follow_theme_label()];
+    let mut out = vec![SharedString::from(
+        t!("settings.font_follow_system").as_ref(),
+    )];
     out.extend(families);
     out
 }
@@ -208,36 +206,24 @@ fn config_path() -> std::path::PathBuf {
 /// Load persisted settings at startup (falls back to defaults) and switch the
 /// interface to the language they ask for.
 fn load(cx: &mut App) {
-    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
-    cx.set_global(Settings::from_json_str(&text));
+    let loaded_settings = std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
+        .unwrap_or_default();
+    cx.set_global(loaded_settings);
     settings(cx).language.apply();
 }
 
 /// Write the current settings back to disk. Errors are ignored: missing
 /// config directories or read-only disks must not crash the app.
 fn persist(cx: &App) {
-    let s = cx.global::<Settings>();
-    let json = serde_json::json!({
-        "mono_font": s.mono_font.as_deref().unwrap_or(""),
-        "font_size": s.font_size,
-        "ui_font_size": s.ui_font_size,
-        "zoom": s.zoom,
-        "line_numbers": s.line_numbers,
-        "wrap_raw_lines": s.wrap_raw_lines,
-        "sort_object_keys": s.sort_object_keys,
-        "appearance": appearance_key(s.appearance),
-        "language": s.language.key(),
-        "syntax_dark": s.syntax_dark.as_ref(),
-        "syntax_light": s.syntax_light.as_ref(),
-    });
+    let settings = cx.global::<Settings>();
     let path = config_path();
     if let Some(dir) = path.parent()
         && std::fs::create_dir_all(dir).is_ok()
+        && let Ok(file) = std::fs::File::create(&path)
     {
-        let _ = std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&json).unwrap_or_default(),
-        );
+        let _ = serde_json::to_writer_pretty(file, settings);
     }
 }
 

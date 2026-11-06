@@ -107,17 +107,15 @@ fn line_spans(line: &str) -> Vec<Span> {
                         || c == 'e'
                         || c == 'E'
                 };
-                if i >= chars.len() || !is_word_char(chars[i]) {
-                    if !plain.is_empty() {
-                        let kind = match plain.as_str() {
-                            "true" | "false" => SpanKind::Bool,
-                            "null" => SpanKind::Null,
-                            s if looks_like_number(s) => SpanKind::Num,
-                            _ => SpanKind::Plain,
-                        };
-                        out.push(Span::new(kind, plain.clone()));
-                        plain.clear();
-                    }
+                if (i >= chars.len() || !is_word_char(chars[i])) && !plain.is_empty() {
+                    let kind = match plain.as_str() {
+                        "true" | "false" => SpanKind::Bool,
+                        "null" => SpanKind::Null,
+                        s if looks_like_number(s) => SpanKind::Num,
+                        _ => SpanKind::Plain,
+                    };
+                    out.push(Span::new(kind, plain.clone()));
+                    plain.clear();
                 }
             }
         }

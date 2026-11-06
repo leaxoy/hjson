@@ -29,13 +29,8 @@ impl HomeView {
     /// Success notes stay on the page's status line; failures pop up as
     /// notifications so they cannot be missed.
     pub(super) fn set_status(&mut self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
-        let text = text.into();
-        if ok {
-            self.status = Some(Status::from_parts(true, text));
-        } else {
-            self.status = None;
-            chrome::notify_failure(text, cx);
-        }
+        self.status = chrome::inline_success_or_notify_failure(ok, text, cx)
+            .map(|text| Status::from_parts(true, text));
     }
 
     /// Hand a loaded document to the app: the active home tab turns into the

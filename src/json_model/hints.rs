@@ -175,7 +175,8 @@ mod tests {
                 "sent_timestamp": 1700000000000000,
                 "received_date": 1700000000000000000
             }"#,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             hint_for(&doc, "created_time").as_deref(),
@@ -204,7 +205,8 @@ mod tests {
                 "sent_timestamp": "1700000000.123",
                 "bad_time": "not a timestamp"
             }"#,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             hint_for(&doc, "created_time").as_deref(),
@@ -223,7 +225,7 @@ mod tests {
 
     #[test]
     fn timestamp_hint_ignores_non_epoch_durations() {
-        let doc = JsonTree::parse(r#"{"timeout": 3000, "count": 1700000000}"#);
+        let doc = JsonTree::parse(r#"{"timeout": 3000, "count": 1700000000}"#).unwrap();
 
         assert_eq!(hint_for(&doc, "timeout"), None);
         assert_eq!(hint_for(&doc, "count"), None);

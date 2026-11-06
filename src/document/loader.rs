@@ -117,10 +117,10 @@ fn from_parts(
     if text.is_empty() {
         return Err(AppError::parse(tr!("Nothing to compare")));
     }
-    let parsed = parsed.unwrap_or_else(|| Arc::new(JsonTree::parse(&text)));
-    if let Some(err) = &parsed.error {
-        return Err(AppError::parse(err));
-    }
+    let parsed = match parsed {
+        Some(parsed) => parsed,
+        None => Arc::new(JsonTree::parse(&text).map_err(AppError::parse)?),
+    };
     Ok(LoadedDocument {
         kind,
         title,

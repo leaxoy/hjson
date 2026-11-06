@@ -4,6 +4,8 @@ use gpui_kit::{Action, Context, KeyBinding, WeakEntity, Window};
 
 use super::{AppWindows, HJsonApp, TabPage};
 
+type WindowAction = dyn Fn(&mut HJsonApp, &mut Window, &mut Context<HJsonApp>);
+
 gpui_kit::actions!(
     hjson,
     [
@@ -71,7 +73,7 @@ fn window_action<A: Action>(
     run: impl Fn(&mut HJsonApp, &mut Window, &mut Context<HJsonApp>) + 'static,
 ) {
     // Handlers can fire repeatedly, so the closure is shared instead of moved.
-    let run: Rc<dyn Fn(&mut HJsonApp, &mut Window, &mut Context<HJsonApp>)> = Rc::new(run);
+    let run: Rc<WindowAction> = Rc::new(run);
     cx.on_action(move |_: &A, cx| {
         let Some(app) = active_app(cx) else { return };
         let run = run.clone();

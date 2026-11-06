@@ -7,6 +7,7 @@
 //! code it resolves to, and the system probe for `Auto`.
 
 use rust_i18n::t;
+use serde::{Deserialize, Serialize};
 
 /// `t!` for the places a widget wants a `SharedString` rather than a `&str`,
 /// which is most of them. Same lookup, same key.
@@ -35,10 +36,13 @@ pub const ZH: &str = "zh";
 ///
 /// `Auto` reads the system locale; the two fixed values never consult it, so
 /// picking a language keeps working on a system that reports something else.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
+    #[serde(rename = "auto")]
     Auto,
+    #[serde(rename = "en")]
     English,
+    #[serde(rename = "zh")]
     Chinese,
 }
 

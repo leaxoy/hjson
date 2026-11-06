@@ -154,6 +154,22 @@ pub fn notify_failure(text: impl Into<String>, cx: &mut App) {
     });
 }
 
+/// Return success text for inline status bars, or show failures as floating
+/// notifications. Each page owns where successful feedback appears.
+pub fn inline_success_or_notify_failure(
+    ok: bool,
+    text: impl Into<String>,
+    cx: &mut App,
+) -> Option<String> {
+    let text = text.into();
+    if ok {
+        Some(text)
+    } else {
+        notify_failure(text, cx);
+        None
+    }
+}
+
 /// The " (⌘[)" tooltip suffix for an action, read from the live keymap so the
 /// text tracks the binding instead of hardcoding glyphs.
 pub fn shortcut_suffix(action: &dyn Action, window: &Window) -> String {

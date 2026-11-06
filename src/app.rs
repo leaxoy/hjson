@@ -39,6 +39,7 @@ pub enum TabPage {
 }
 
 pub struct HJsonApp {
+    me: WeakEntity<HJsonApp>,
     tabs: Vec<TabPage>,
     active: usize,
     title_editor: Option<tabs::TabTitleEditor>,
@@ -58,9 +59,9 @@ impl HJsonApp {
         let table = &mut cx.global_mut::<AppWindows>().0;
         table.retain(|(_, live)| live.upgrade().is_some());
         table.push((window.window_handle(), app.clone()));
-        let mut tabs = Vec::new();
-        tabs.push(TabPage::Home(cx.new(|_| HomeView::new(app.clone()))));
+        let tabs = vec![TabPage::Home(cx.new(|_| HomeView::new(app.clone())))];
         Self {
+            me: app,
             tabs,
             active: 0,
             title_editor: None,

@@ -51,48 +51,37 @@ pub struct JsonTree {
     pub nodes: Vec<FlatNode>,
     /// Pretty-printed root JSON, kept for the raw panel.
     pub pretty: String,
-    pub error: Option<String>,
 }
 
 impl JsonTree {
     /// Parse a text and build the tree arena. Object key order is preserved.
-    pub fn parse(text: &str) -> Self {
-        match serde_json::from_str::<Value>(text) {
-            Ok(root) => {
-                let nodes = vec![FlatNode {
-                    parent: None,
-                    children: Vec::new(),
-                    depth: 0,
-                    key: None,
-                    index: None,
-                    typ: JsonType::Null,
-                    summary: String::new(),
-                    line: None,
-                }];
-                let mut builder = Builder { nodes };
-                builder.attach(0, &root);
-                let mut nodes = std::mem::take(&mut builder.nodes);
-                // One walk gives the raw panel its text and every node its
-                // line, so the two panes can never drift apart.
-                let doc = pretty::document(&root);
-                for id in 0..nodes.len() {
-                    let path = json_path_for(&nodes, id);
-                    nodes[id].line = doc.anchors.get(&path).copied();
-                }
-                Self {
-                    root,
-                    nodes,
-                    pretty: doc.text,
-                    error: None,
-                }
-            }
-            Err(e) => Self {
-                root: Value::Null,
-                nodes: Vec::new(),
-                pretty: String::new(),
-                error: Some(e.to_string()),
-            },
+    pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
+        let root = serde_json::from_str::<Value>(text)?;
+        let nodes = vec![FlatNode {
+            parent: None,
+            children: Vec::new(),
+            depth: 0,
+            key: None,
+            index: None,
+            typ: JsonType::Null,
+            summary: String::new(),
+            line: None,
+        }];
+        let mut builder = Builder { nodes };
+        builder.attach(0, &root);
+        let mut nodes = std::mem::take(&mut builder.nodes);
+        // One walk gives the raw panel its text and every node its line, so the
+        // two panes can never drift apart.
+        let doc = pretty::document(&root);
+        for id in 0..nodes.len() {
+            let path = json_path_for(&nodes, id);
+            nodes[id].line = doc.anchors.get(&path).copied();
         }
+        Ok(Self {
+            root,
+            nodes,
+            pretty: doc.text,
+        })
     }
 
     /// Visible node ids (flattened, preorder) given the expanded set.
@@ -357,8 +346,7 @@ mod tests {
 
     #[test]
     fn parse_types_and_summary() {
-        let t = JsonTree::parse(SAMPLE);
-        assert!(t.error.is_none());
+        let t = JsonTree::parse(SAMPLE).unwrap();
         let root_children = t.nodes[0].children.clone();
         assert_eq!(root_children.len(), 2);
         assert_eq!(t.nodes[root_children[0]].typ, JsonType::String);
@@ -370,7 +358,7 @@ mod tests {
 
     #[test]
     fn paths() {
-        let t = JsonTree::parse(SAMPLE);
+        let t = JsonTree::parse(SAMPLE).unwrap();
         let items = t.nodes[0].children[1];
         assert_eq!(t.json_path(items), "$.items");
         assert_eq!(t.json_pointer(items), "/items");
@@ -384,7 +372,7 @@ mod tests {
 
     #[test]
     fn visible_expansion() {
-        let t = JsonTree::parse(SAMPLE);
+        let t = JsonTree::parse(SAMPLE).unwrap();
         let name = t.nodes[0].children[0];
         let items = t.nodes[0].children[1];
         let mut expanded = HashSet::new();
@@ -400,7 +388,7 @@ mod tests {
 
     #[test]
     fn subtree_and_descendants() {
-        let t = JsonTree::parse(SAMPLE);
+        let t = JsonTree::parse(SAMPLE).unwrap();
         let items = t.nodes[0].children[1];
         assert_eq!(t.descendant_count(items), 4);
         let sub = t.subtree_json(items).unwrap();

@@ -134,7 +134,7 @@ impl HJsonApp {
 
     pub(super) fn tab_title(&self, ix: usize, cx: &gpui_kit::App) -> Option<SharedString> {
         match self.tabs.get(ix)? {
-            TabPage::Home(_) => Some(tr!("Home").into()),
+            TabPage::Home(_) => Some(tr!("Home")),
             TabPage::Doc(doc_view) => Some(doc_view.read(cx).title.clone()),
             TabPage::Diff(view) => Some(crate::views::diff::tab_title(view.read(cx))),
         }

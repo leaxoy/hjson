@@ -2,9 +2,9 @@ use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{AppContext as _, Context, Entity, SharedString, Window};
 
-use crate::components::source_menu::{open_manual_dialog, open_url_dialog};
-use crate::document::SourceKind;
-use crate::document::{self, LoadedDocument};
+use crate::components::source_menu::{LoadMethod, LoadTarget, open_manual_dialog, open_url_dialog};
+use crate::document::{LoadedDocument, SourceKind};
+use crate::error::AppError;
 use crate::json_model::JsonTree;
 use crate::tr;
 use crate::views::doc::DocView;
@@ -145,28 +145,16 @@ impl HJsonApp {
     }
 
     pub fn open_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = cx.read_from_clipboard().and_then(|item| item.text());
-        match text {
-            Some(text) if !text.trim().is_empty() => match document::from_clipboard(text) {
-                Ok(document) => {
-                    self.open_document(document, window, cx);
-                }
-                Err(err) => self.note_home(false, err.message(), cx),
-            },
-            Some(_) => self.note_home(false, tr!("The clipboard is empty"), cx),
-            None => self.note_home(false, tr!("No text on the clipboard"), cx),
-        }
-        cx.notify();
+        self.apply_load((), LoadMethod::Clipboard, window, cx);
     }
 
     /// Success notes stay on the home page's status line; failures pop up as
     /// notifications so they cannot be missed.
     fn note_home(&self, ok: bool, text: impl Into<String>, cx: &mut Context<Self>) {
-        let text = text.into();
-        if !ok {
-            crate::components::chrome::notify_failure(text, cx);
+        let Some(text) = crate::components::chrome::inline_success_or_notify_failure(ok, text, cx)
+        else {
             return;
-        }
+        };
         let Some(TabPage::Home(home)) = self.tabs.get(self.active) else {
             return;
         };
@@ -178,33 +166,8 @@ impl HJsonApp {
     }
 
     /// Open a file picked from disk.
-    pub fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let path = match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
-            let Some(path) = path else { return };
-            let read = cx.background_spawn(async move { document::from_file(path) });
-            let result = read.await;
-            this.update_in(cx, |app, window, cx| {
-                match result {
-                    Ok(document) => {
-                        app.open_document(document, window, cx);
-                    }
-                    Err(e) => app.note_home(false, e.message(), cx),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    pub fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_load((), LoadMethod::PickFile, window, cx);
     }
 
     pub fn open_url_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -224,29 +187,52 @@ impl HJsonApp {
     }
 
     pub fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match document::from_sample() {
-            Ok(document) => {
-                self.open_document(document, window, cx);
-            }
-            Err(err) => self.note_home(false, err.message(), cx),
-        }
-        cx.notify();
+        self.apply_load((), LoadMethod::Sample, window, cx);
     }
 
     pub fn open_doc(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.docs.iter().find(|d| d.id == id) else {
-            return;
-        };
-        let kind = entry.kind;
-        let title = entry.title.clone();
-        let text = entry.text.clone();
-        let url = entry.url.clone();
-        match document::from_history(kind, title.to_string(), text, url, entry.parsed.upgrade()) {
-            Ok(document) => {
-                self.open_document(document, window, cx);
-            }
-            Err(err) => self.note_home(false, err.message(), cx),
+        self.apply_load((), LoadMethod::History(id), window, cx);
+    }
+}
+
+impl LoadTarget for HJsonApp {
+    type Slot = ();
+
+    fn history_app(&self) -> Option<&gpui_kit::WeakEntity<HJsonApp>> {
+        Some(&self.me)
+    }
+
+    fn load_started(&mut self, _slot: (), method: &LoadMethod, cx: &mut Context<Self>) {
+        if let LoadMethod::FetchUrl { url, .. } = method {
+            self.note_home(
+                true,
+                tr!("Requesting %{url} …", url = url.clone()).to_string(),
+                cx,
+            );
         }
+    }
+
+    fn load_succeeded(
+        &mut self,
+        _slot: (),
+        method: LoadMethod,
+        document: LoadedDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let loaded_url = document.url.clone().unwrap_or_default();
+        self.open_document(document, window, cx);
+        match method {
+            LoadMethod::FetchUrl { .. } => {
+                self.note_home(true, tr!("Loaded %{url}", url = loaded_url).to_string(), cx)
+            }
+            LoadMethod::PickFile => self.note_home(true, tr!("File opened"), cx),
+            _ => {}
+        }
+    }
+
+    fn load_failed(&mut self, _slot: (), error: AppError, cx: &mut Context<Self>) {
+        self.note_home(false, error.message(), cx);
     }
 }
 
