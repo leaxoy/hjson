@@ -98,8 +98,9 @@ fn active_app(cx: &gpui_kit::App) -> Option<WeakEntity<HJsonApp>> {
 /// from clipboard / URL / file / manual input / sample data, `cmd-shift-h`
 /// toggles the history sidebar, `cmd-1` … `cmd-9` select tabs, `cmd-=`, `cmd--`
 /// and `cmd-0` control page scale, `cmd-ctrl-f` toggles fullscreen, `cmd-f`
-/// filters the tree, `cmd-shift-e` / `cmd-shift-c` expand and collapse it, and
-/// `cmd-[` / `cmd-]` step through a comparison.
+/// filters the tree, and `cmd-[` / `cmd-]` step through a comparison.
+/// `cmd-shift-e` / `cmd-shift-c` belong to the document pane key contexts so
+/// they only affect the focused raw editor or tree viewer.
 pub fn init(cx: &mut gpui_kit::App) {
     // The document view's own per-pane keys (arrows, tab) live with the panes.
     crate::views::doc::init(cx);
@@ -204,14 +205,6 @@ pub fn init(cx: &mut gpui_kit::App) {
         KeyBinding::new("cmd-f", FindInDoc, None),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-f", FindInDoc, None),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-e", ExpandAll, None),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-e", ExpandAll, None),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-c", CollapseAll, None),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-c", CollapseAll, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", DiffPrev, None),
         #[cfg(not(target_os = "macos"))]

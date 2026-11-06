@@ -242,12 +242,12 @@ impl HJsonApp {
         });
     }
 
-    /// `cmd-shift-e` / `cmd-shift-c`: rebuild the tree at every depth, or only
-    /// the root's children.
+    /// `cmd-shift-e` / `cmd-shift-c`: expand or collapse the focused document
+    /// viewer.
     pub fn set_tree_depth(&self, expand_all: bool, window: &Window, cx: &mut Context<Self>) {
-        self.with_doc_view(window, cx, move |doc_view, _, cx| match expand_all {
-            true => doc_view.expand_all(cx),
-            false => doc_view.collapse_all(cx),
+        self.with_doc_view(window, cx, move |doc_view, window, cx| match expand_all {
+            true => doc_view.expand_all(window, cx),
+            false => doc_view.collapse_all(window, cx),
         });
     }
 

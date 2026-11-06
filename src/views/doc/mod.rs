@@ -3,48 +3,44 @@
 //! reload and compare — sit in the raw pane's header; the tree's filter sits in
 //! the tree's header, next to what it filters.
 //!
-//! The two panes are one view of one document: selecting a node highlights the
-//! line its value starts on and scrolls the raw pane to it. `tab` moves the
-//! keyboard between the panes; the tree then takes `↑↓←→` and `enter`, the raw
-//! pane takes `↑↓`, page keys, `home` and `end`.
+//! The two panes are one view of one document: selecting a node moves the raw
+//! editor cursor to the line its value starts on and reveals that line. `tab`
+//! moves the keyboard between the panes; the tree takes `↑↓←→` and `enter`,
+//! while the raw pane starts as a readonly editor for selection, scrolling, and
+//! copy. Its header can unlock editing when a user wants to patch the text.
 //!
 //! The document view only ever receives documents that already parsed successfully;
 //! parse errors are caught on the home page.
 
-use std::{collections::HashSet, ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{
-    Selectable as _,
-    actions::{
-        Confirm, SelectDown, SelectFirst, SelectLast, SelectPageDown, SelectPageUp, SelectUp,
-    },
-};
+use gpui_kit::base::{Selectable as _, actions::Confirm};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, VirtualListScrollHandle,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonGroup, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Editor, EditorState, Input, InputEvent, InputState, Position},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel},
-    scroll::ScrollableElement as _,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState,
-    ParentElement as _, Pixels, RenderOnce, ScrollStrategy, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
-    size,
+    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState, ParentElement as _,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, WeakEntity, Window, div, px,
 };
 
 use crate::app::{CollapseAll, ExpandAll};
 use crate::components::chrome;
-use crate::components::json_text::{
-    self, JsonTextGutter, JsonTextMode, JsonTextView, JsonTextViewProps,
-};
 use crate::components::json_tree::{
     self, JsonTreeView, JsonTreeViewProps, TreeRow, build_tree_rows, tree_list_splice, type_color,
     type_icon,
@@ -53,9 +49,9 @@ use crate::components::source_menu::{self, LoadMethod, LoadOptions, LoadTarget};
 use crate::document::{self, LoadedDocument, SourceKind};
 use crate::error::{AppError, Status};
 use crate::json_model::{JsonTree, JsonType};
-use crate::syntax::{Span, highlight};
 
 const TREE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
+const RAW_SYNC_DEBOUNCE: Duration = Duration::from_millis(180);
 const TOAST_DURATION: Duration = Duration::from_secs(3);
 
 // `tab` in one of the two panes: the keyboard moves to the other one.
@@ -67,18 +63,28 @@ const RAW_CONTEXT: &str = "hjson-raw";
 /// tree" in one and "scroll the text" in the other.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-e", ExpandAll, Some(json_tree::TREE_CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-e", ExpandAll, Some(json_tree::TREE_CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-c", CollapseAll, Some(json_tree::TREE_CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-c", CollapseAll, Some(json_tree::TREE_CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-e", ExpandAll, Some(RAW_CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-e", ExpandAll, Some(RAW_CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-c", CollapseAll, Some(RAW_CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-c", CollapseAll, Some(RAW_CONTEXT)),
         KeyBinding::new(
             "enter",
             Confirm { secondary: false },
             Some(json_tree::TREE_CONTEXT),
         ),
         KeyBinding::new("tab", NextPane, Some(json_tree::TREE_CONTEXT)),
-        KeyBinding::new("up", SelectUp, Some(RAW_CONTEXT)),
-        KeyBinding::new("down", SelectDown, Some(RAW_CONTEXT)),
-        KeyBinding::new("pageup", SelectPageUp, Some(RAW_CONTEXT)),
-        KeyBinding::new("pagedown", SelectPageDown, Some(RAW_CONTEXT)),
-        KeyBinding::new("home", SelectFirst, Some(RAW_CONTEXT)),
-        KeyBinding::new("end", SelectLast, Some(RAW_CONTEXT)),
         KeyBinding::new("tab", NextPane, Some(RAW_CONTEXT)),
     ]);
 }
@@ -134,18 +140,13 @@ pub struct DocView {
     /// Original URL when this document came from HTTP, for toolbar re-fetch.
     url: Option<String>,
     doc: Arc<JsonTree>,
-    lines: Rc<Vec<Vec<Span>>>,
-    line_sizes: Rc<Vec<Size<Pixels>>>,
-    raw_widest_line: usize,
-    /// Row height the line sizes were built for, so settings changes rebuild.
+    raw_editor: Entity<EditorState>,
+    /// Editor and tree row height derived from the current text settings.
     line_h: f32,
-    raw_scroll: VirtualListScrollHandle,
-    raw_list: ListState,
     raw_wrap: bool,
-    /// Focus for the raw pane; the arrow keys scroll it while this has focus.
-    raw_focus: FocusHandle,
-    /// Line of `lines` revealed for the selected tree node, so the two panes
-    /// show the same node. `None` until something is selected.
+    raw_editable: bool,
+    /// Raw editor line revealed for the selected tree node. `None` until
+    /// something is selected.
     linked: Option<usize>,
     tree_rows: Rc<Vec<TreeRow>>,
     expanded: HashSet<usize>,
@@ -156,6 +157,8 @@ pub struct DocView {
     search: Entity<InputState>,
     search_locale: &'static str,
     search_task: Option<Task<()>>,
+    raw_sync_task: Option<Task<()>>,
+    raw_sync_generation: u64,
     query: Option<String>,
     match_count: usize,
     toast: Option<Status>,
@@ -173,19 +176,22 @@ impl DocView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let lines = Rc::new(highlight(&doc.pretty));
-        let raw_widest_line = json_text::widest_line(&lines);
-        let line_h = crate::views::settings::settings(cx).row_height();
-        let line_sizes = Rc::new(vec![size(px(640.), px(line_h)); lines.len()]);
-        let raw_list = ListState::new(
-            lines.len(),
-            ListAlignment::Top,
-            px(json_tree::LIST_OVERDRAW_PX),
-        )
-        .with_uniform_item_height(px(line_h));
-        let raw_wrap = crate::views::settings::settings(cx).wrap_raw_lines;
-        let sort_keys = crate::views::settings::settings(cx).sort_object_keys;
-        let search_locale = crate::views::settings::settings(cx).language.locale();
+        let settings = crate::views::settings::settings(cx);
+        let line_h = settings.row_height();
+        let raw_wrap = settings.wrap_raw_lines;
+        let line_numbers = settings.line_numbers;
+        let sort_keys = settings.sort_object_keys;
+        let search_locale = settings.language.locale();
+        let raw_text = doc.pretty.clone();
+        let raw_editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .default_value(raw_text)
+                .language("json")
+                .line_number(line_numbers)
+                .soft_wrap(raw_wrap)
+                .scroll_beyond_last_line(Some(0))
+                .scroll_bounce(false)
+        });
         let expanded = HashSet::from([0]);
         let (tree_rows, _) = build_tree_rows(&doc, None, &expanded, sort_keys);
         let tree_list = ListState::new(
@@ -205,21 +211,23 @@ impl DocView {
                 this.schedule_filter(q, cx);
             }
         });
+        let raw_sub = cx.subscribe_in(&raw_editor, window, |this, state, event, _window, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = state.read(cx).value().to_string();
+                this.schedule_raw_sync(text, cx);
+            }
+        });
 
         Self {
             app,
             title: title.into(),
             kind,
             url,
-            lines,
+            raw_editor,
             doc,
-            line_sizes,
-            raw_widest_line,
             line_h,
-            raw_scroll: VirtualListScrollHandle::new(),
-            raw_list,
             raw_wrap,
-            raw_focus: cx.focus_handle(),
+            raw_editable: false,
             linked: None,
             tree_rows: Rc::new(tree_rows),
             expanded,
@@ -230,11 +238,13 @@ impl DocView {
             search,
             search_locale,
             search_task: None,
+            raw_sync_task: None,
+            raw_sync_generation: 0,
             query: None,
             match_count: 0,
             toast: None,
             toast_generation: 0,
-            _subs: vec![search_sub],
+            _subs: vec![search_sub, raw_sub],
         }
     }
 
@@ -253,13 +263,114 @@ impl DocView {
         self.rebuild_tree_rows(cx);
     }
 
+    fn schedule_raw_sync(&mut self, text: String, cx: &mut Context<Self>) {
+        self.raw_sync_generation = self.raw_sync_generation.wrapping_add(1);
+        let generation = self.raw_sync_generation;
+        self.raw_sync_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RAW_SYNC_DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.raw_sync_generation == generation {
+                    this.apply_raw_sync(text, cx);
+                }
+            });
+        }));
+    }
+
+    fn apply_raw_sync(&mut self, text: String, cx: &mut Context<Self>) {
+        let next = JsonTree::parse(&text);
+        if let Some(err) = next.error.clone() {
+            self.toast = Some(Status::Error(AppError::parse(err)));
+            cx.notify();
+            return;
+        }
+
+        self.replace_tree_document(Arc::new(next), cx);
+    }
+
+    fn replace_tree_document(&mut self, doc: Arc<JsonTree>, cx: &mut Context<Self>) {
+        let selected_path = self
+            .selected_node
+            .and_then(|id| self.doc.nodes.get(id).map(|_| self.doc.json_path(id)));
+        let expanded_paths = self
+            .expanded
+            .iter()
+            .filter_map(|&id| self.doc.nodes.get(id).map(|_| self.doc.json_path(id)))
+            .collect::<HashSet<_>>();
+        let ids_by_path = node_ids_by_path(&doc);
+
+        self.selected_node = selected_path.and_then(|path| ids_by_path.get(&path).copied());
+        self.linked = self.selected_node.and_then(|id| doc.line_of(id));
+        self.expanded = expanded_paths
+            .into_iter()
+            .filter_map(|path| ids_by_path.get(&path).copied())
+            .filter(|&id| id == 0 || !doc.nodes[id].children.is_empty())
+            .collect();
+        if !doc.nodes.is_empty() {
+            self.expanded.insert(0);
+        }
+        if matches!(self.toast, Some(Status::Error(_))) {
+            self.toast = None;
+        }
+        self.doc = doc;
+        self.rebuild_tree_rows(cx);
+    }
+
     /// `cmd-shift-e` / `cmd-shift-c`, and the tree header's two buttons.
-    pub fn expand_all(&mut self, cx: &mut Context<Self>) {
+    pub fn expand_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_focused_viewer_depth(true, window, cx);
+    }
+
+    pub fn collapse_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_focused_viewer_depth(false, window, cx);
+    }
+
+    fn set_focused_viewer_depth(
+        &mut self,
+        expand: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let raw_focused = self.raw_editor.focus_handle(cx).is_focused(window);
+        let tree_focused =
+            self.tree_focus.is_focused(window) || self.search.focus_handle(cx).is_focused(window);
+
+        if raw_focused || (!tree_focused && self.pane_mode == DocPaneMode::Text) {
+            self.set_raw_depth(expand, window, cx);
+        } else {
+            self.set_expand(
+                if expand {
+                    ExpandMode::All
+                } else {
+                    ExpandMode::Root
+                },
+                cx,
+            );
+        }
+    }
+
+    fn expand_tree_all(&mut self, cx: &mut Context<Self>) {
         self.set_expand(ExpandMode::All, cx);
     }
 
-    pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
+    fn collapse_tree_all(&mut self, cx: &mut Context<Self>) {
         self.set_expand(ExpandMode::Root, cx);
+    }
+
+    fn set_raw_depth(&mut self, expand: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if expand {
+            self.raw_editor.update(cx, |editor, cx| {
+                editor.set_folding(false, window, cx);
+                editor.set_folding(true, window, cx);
+            });
+            cx.notify();
+            return;
+        }
+
+        self.toast = Some(Status::from_parts(
+            false,
+            tr!("Raw collapse all requires a public editor folding API").to_string(),
+        ));
+        cx.notify();
     }
 
     fn set_expand(&mut self, expand: ExpandMode, cx: &mut Context<Self>) {
@@ -300,7 +411,7 @@ impl DocView {
         cx.notify();
     }
 
-    fn move_tree_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn move_tree_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let count = self.tree_rows.len();
         if count == 0 {
             return;
@@ -315,7 +426,7 @@ impl DocView {
             (Some(ix), false) if ix + 1 >= count => 0,
             (Some(ix), false) => ix + 1,
         };
-        self.select_tree_node(self.tree_rows[next].node_id, cx);
+        self.select_tree_node(self.tree_rows[next].node_id, window, cx);
         self.tree_list.scroll_to_reveal_item(next);
     }
 
@@ -338,7 +449,7 @@ impl DocView {
 
     fn activate_tree_node(&mut self, node_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tree_focus.focus(window, cx);
-        self.select_tree_node(node_id, cx);
+        self.select_tree_node(node_id, window, cx);
         self.toggle_tree_node(node_id, cx);
     }
 
@@ -348,7 +459,7 @@ impl DocView {
         }
     }
 
-    fn collapse_tree_selection(&mut self, cx: &mut Context<Self>) {
+    fn collapse_tree_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node_id) = self.selected_node else {
             return;
         };
@@ -357,7 +468,7 @@ impl DocView {
             return;
         }
         if let Some(parent) = self.doc.nodes[node_id].parent {
-            self.select_tree_node(parent, cx);
+            self.select_tree_node(parent, window, cx);
             if let Some(ix) = self.tree_rows.iter().position(|row| row.node_id == parent) {
                 self.tree_list.scroll_to_reveal_item(ix);
             }
@@ -375,53 +486,33 @@ impl DocView {
 
     // ---------- pane linkage ----------
 
-    fn select_tree_node(&mut self, node_id: usize, cx: &mut Context<Self>) {
+    fn select_tree_node(&mut self, node_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_node = Some(node_id);
         let line = self.doc.line_of(node_id);
         if line != self.linked {
             self.linked = line;
             if let Some(line) = line {
-                if self.raw_wrap {
-                    self.raw_list.scroll_to_reveal_item(line);
-                } else {
-                    self.raw_scroll.scroll_to_item(line, ScrollStrategy::Center);
-                }
+                self.reveal_raw_line(line, window, cx);
             }
         }
         cx.notify();
     }
 
-    /// Move the raw pane's viewport so `line` is its first visible row.
-    fn scroll_raw_to(&mut self, line: usize, cx: &mut Context<Self>) {
-        let last = self.lines.len().saturating_sub(1);
-        let line = line.min(last);
-        if self.raw_wrap {
-            self.raw_list.scroll_to(ListOffset {
-                item_ix: line,
-                offset_in_item: px(0.),
-            });
-        } else {
-            self.raw_scroll.scroll_to_item(line, ScrollStrategy::Top);
-        }
-        cx.notify();
-    }
-
-    fn raw_top_item(&self) -> usize {
-        if self.raw_wrap {
-            self.raw_list.logical_scroll_top().item_ix
-        } else {
-            self.raw_scroll.top_item()
+    fn reveal_raw_line(&self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let tree_was_focused = self.tree_focus.is_focused(window);
+        let line = line.min(u32::MAX as usize) as u32;
+        self.raw_editor.update(cx, |editor, cx| {
+            editor.unfold_at(Position::new(line, 0), cx);
+            editor.set_cursor_position(Position::new(line, 0), window, cx);
+        });
+        if tree_was_focused {
+            self.tree_focus.focus(window, cx);
         }
     }
 
-    /// Rows that fit in the raw pane at the current row height.
-    fn raw_page(&self) -> usize {
-        let height = if self.raw_wrap {
-            self.raw_list.viewport_bounds().size.height
-        } else {
-            self.raw_scroll.bounds().size.height
-        };
-        (((height / px(1.)) / self.line_h).floor() as usize).max(1)
+    fn focus_raw_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.raw_editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
     }
 
     /// `cmd-f`: put the cursor in the tree's filter.
@@ -434,11 +525,36 @@ impl DocView {
         self.say(true, toast, cx);
     }
 
+    fn raw_text(&self, cx: &mut Context<Self>) -> String {
+        self.raw_editor.read(cx).value().to_string()
+    }
+
+    fn current_document_snapshot(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Result<LoadedDocument, AppError> {
+        let text = self.raw_text(cx);
+        let parsed = (text == self.doc.pretty).then(|| self.doc.clone());
+        document::from_history(
+            self.kind,
+            self.title.to_string(),
+            text,
+            self.url.clone(),
+            parsed,
+        )
+    }
+
     fn save_json(&mut self, compact: bool, cx: &mut Context<Self>) {
         let text = if compact {
-            serde_json::to_string(&self.doc.root).unwrap_or_default()
+            match self.current_document_snapshot(cx) {
+                Ok(document) => serde_json::to_string(&document.parsed.root).unwrap_or_default(),
+                Err(err) => {
+                    self.say(false, err.message(), cx);
+                    return;
+                }
+            }
         } else {
-            self.doc.pretty.clone()
+            self.raw_text(cx)
         };
         let mut name = self.title.replace(['/', '\\', ':'], "_").trim().to_string();
         if !name.to_lowercase().ends_with(".json") {
@@ -623,6 +739,17 @@ impl DocView {
             Err(err) => self.say(false, err.message(), cx),
         }
     }
+
+    fn toggle_raw_editable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.raw_editable = !self.raw_editable;
+        let readonly = !self.raw_editable;
+        self.raw_editor
+            .update(cx, |editor, cx| editor.set_readonly(readonly, cx));
+        if self.raw_editable {
+            self.focus_raw_editor(window, cx);
+        }
+        cx.notify();
+    }
 }
 
 impl LoadTarget for DocView {
@@ -705,6 +832,14 @@ fn is_json_text(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text).is_ok()
 }
 
+fn node_ids_by_path(doc: &JsonTree) -> HashMap<String, usize> {
+    doc.nodes
+        .iter()
+        .enumerate()
+        .map(|(id, _)| (doc.json_path(id), id))
+        .collect()
+}
+
 /// What "Copy value" should copy: raw scalar text, or the pretty subtree.
 fn value_to_copy(doc: &JsonTree, id: usize) -> String {
     if doc.nodes[id].children.is_empty() {
@@ -727,10 +862,10 @@ impl gpui_kit::Render for DocView {
             .font_family(theme.font_family.clone())
             // `tab` arrives from whichever pane had focus; hand it to the other.
             .on_action(cx.listener(|this, _: &NextPane, window, cx| {
-                if this.raw_focus.is_focused(window) {
+                if this.raw_editor.focus_handle(cx).is_focused(window) {
                     this.tree_focus.focus(window, cx);
                 } else {
-                    this.raw_focus.focus(window, cx);
+                    this.focus_raw_editor(window, cx);
                 }
             }))
             .child(
@@ -747,16 +882,8 @@ impl gpui_kit::Render for DocView {
 
 impl DocView {
     /// This document as the A side of a new comparison.
-    pub(crate) fn diff_snapshot(&self) -> Option<LoadedDocument> {
-        let text = serde_json::to_string(&self.doc.root).ok()?;
-        document::from_history(
-            self.kind,
-            self.title.to_string(),
-            text,
-            self.url.clone(),
-            Some(self.doc.clone()),
-        )
-        .ok()
+    pub(crate) fn diff_snapshot(&self, cx: &mut Context<Self>) -> Result<LoadedDocument, AppError> {
+        self.current_document_snapshot(cx)
     }
 
     fn render_split(
@@ -794,7 +921,7 @@ impl DocView {
         self.pane_mode = mode;
         match mode {
             DocPaneMode::Split => {}
-            DocPaneMode::Text => self.raw_focus.focus(window, cx),
+            DocPaneMode::Text => self.focus_raw_editor(window, cx),
             DocPaneMode::Tree => self.tree_focus.focus(window, cx),
         }
         cx.notify();
@@ -828,23 +955,38 @@ impl DocView {
 
     fn render_raw_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let bg = cx.theme().background;
-        let view = cx.entity();
-        let wrap_raw_lines = crate::views::settings::settings(cx).wrap_raw_lines;
+        let (wrap_raw_lines, line_numbers, wanted_h, mono) = {
+            let settings = crate::views::settings::settings(cx);
+            (
+                settings.wrap_raw_lines,
+                settings.line_numbers,
+                settings.row_height(),
+                settings.mono_family(cx),
+            )
+        };
         if self.raw_wrap != wrap_raw_lines {
             self.raw_wrap = wrap_raw_lines;
-            self.raw_list.remeasure();
+            self.raw_editor.update(cx, |editor, cx| {
+                editor.set_soft_wrap(wrap_raw_lines, window, cx);
+            });
         }
+        self.raw_editor.update(cx, |editor, cx| {
+            editor.set_line_number(line_numbers, window, cx);
+        });
         // React to font size changes made on the settings page.
-        let wanted_h = crate::views::settings::settings(cx).row_height();
         if (self.line_h - wanted_h).abs() > f32::EPSILON {
             self.line_h = wanted_h;
-            self.line_sizes = Rc::new(vec![size(px(640.), px(wanted_h)); self.lines.len()]);
             self.tree_list.remeasure();
-            self.raw_list.remeasure();
         }
-        let sizes = self.line_sizes.clone();
-        let line_count = self.lines.len();
-        let byte_size = self.doc.pretty.len();
+        let raw_focus = self.raw_editor.focus_handle(cx);
+        let raw_text = self.raw_text(cx);
+        let line_count = raw_text.lines().count();
+        let byte_size = raw_text.len();
+        let edit_tooltip = if self.raw_editable {
+            tr!("Disable raw editing")
+        } else {
+            tr!("Enable raw editing")
+        };
         let header = chrome::panel_toolbar(
             "doc-raw-toolbar",
             tr!("Raw"),
@@ -866,6 +1008,60 @@ impl DocView {
                     },
                     cx.weak_entity(),
                 ),
+                Button::new("toggle-raw-editable")
+                    .icon(if self.raw_editable {
+                        IconName::LockOpen
+                    } else {
+                        IconName::Pencil
+                    })
+                    .ghost()
+                    .small()
+                    .selected(self.raw_editable)
+                    .accessibility_label(edit_tooltip.clone())
+                    .tooltip(edit_tooltip)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_raw_editable(window, cx);
+                    }))
+                    .into_any_element(),
+                Button::new("toggle-raw-line-numbers")
+                    .icon(IconName::ListOrdered)
+                    .ghost()
+                    .small()
+                    .selected(line_numbers)
+                    .accessibility_label(tr!("Show line numbers"))
+                    .tooltip(tr!("Show line numbers"))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        crate::views::settings::update_settings(cx, |settings| {
+                            settings.line_numbers = !settings.line_numbers;
+                        });
+                    }))
+                    .into_any_element(),
+                Button::new("expand-raw-folds")
+                    .icon(IconName::ChevronsUpDown)
+                    .ghost()
+                    .small()
+                    .tooltip(format!(
+                        "{}{}",
+                        tr!("Expand all"),
+                        chrome::shortcut_suffix(&ExpandAll, window)
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_raw_depth(true, window, cx);
+                    }))
+                    .into_any_element(),
+                Button::new("collapse-raw-folds")
+                    .icon(IconName::ChevronsDownUp)
+                    .ghost()
+                    .small()
+                    .tooltip(format!(
+                        "{}{}",
+                        tr!("Collapse all"),
+                        chrome::shortcut_suffix(&CollapseAll, window)
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_raw_depth(false, window, cx);
+                    }))
+                    .into_any_element(),
                 Button::new("compare-doc")
                     .icon(gpui_kit::assets::IconName::GitCompare)
                     .ghost()
@@ -877,8 +1073,12 @@ impl DocView {
                         // Re-serializing the root yields semantically
                         // identical JSON; an empty document has nothing to
                         // hand over.
-                        let Some(document) = this.diff_snapshot() else {
-                            return;
+                        let document = match this.diff_snapshot(cx) {
+                            Ok(document) => document,
+                            Err(err) => {
+                                this.say(false, err.message(), cx);
+                                return;
+                            }
                         };
                         this.app
                             .update(cx, |app, cx| app.new_diff_tab(Some((0, document)), cx))
@@ -892,7 +1092,7 @@ impl DocView {
                     .small()
                     .tooltip(tr!("Copy all JSON"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let text = this.doc.pretty.clone();
+                        let text = this.raw_text(cx);
                         this.copy_text(text, tr!("All JSON copied").to_string(), cx);
                     }))
                     .into_any_element(),
@@ -930,22 +1130,16 @@ impl DocView {
             ],
             cx,
         );
-        let nowrap_width = self.raw_nowrap_width(window, cx);
-        let body = if wrap_raw_lines {
-            self.render_wrapped_raw_list(cx)
-        } else {
-            json_text::render_scrollable_list(
-                view,
-                "raw-lines",
-                sizes,
-                self.raw_widest_line,
-                &self.raw_scroll,
-                nowrap_width,
-                move |doc_view, range, window, cx| {
-                    doc_view.render_raw_rows(range, nowrap_width, window, cx)
-                },
-            )
-        };
+        let font_size = (self.line_h - 8.0).max(1.0);
+        let body = Editor::new(&self.raw_editor)
+            .readonly(!self.raw_editable)
+            .appearance(false)
+            .bordered(false)
+            .size_full()
+            .font_family(mono)
+            .text_size(px(font_size))
+            .line_height(px(self.line_h))
+            .aria_label(tr!("Raw JSON"));
         v_flex()
             .size_full()
             .bg(bg)
@@ -958,49 +1152,14 @@ impl DocView {
                     .size_full()
                     .py_1()
                     .key_context(RAW_CONTEXT)
-                    .track_focus(&self.raw_focus)
-                    // Clicking the text takes the keyboard, so the keys below
-                    // scroll this pane instead of the tree.
+                    .track_focus(&raw_focus)
+                    // Clicking the raw pane gives the editor keyboard focus.
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.raw_focus.focus(window, cx);
+                        this.focus_raw_editor(window, cx);
                     }))
-                    .on_action(cx.listener(|this, _: &SelectUp, _, cx| {
-                        let top = this.raw_top_item();
-                        this.scroll_raw_to(top.saturating_sub(1), cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectDown, _, cx| {
-                        let top = this.raw_top_item();
-                        this.scroll_raw_to(top + 1, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| {
-                        let top = this.raw_top_item();
-                        let page = this.raw_page();
-                        this.scroll_raw_to(top.saturating_sub(page), cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| {
-                        let top = this.raw_top_item();
-                        let page = this.raw_page();
-                        this.scroll_raw_to(top + page, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectFirst, _, cx| {
-                        this.scroll_raw_to(0, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectLast, _, cx| {
-                        this.scroll_raw_to(usize::MAX, cx);
-                    }))
-                    .child(body)
-                    .when(!wrap_raw_lines, |this| {
-                        this.children(json_text::horizontal_masks(
-                            "raw-horizontal-wheel",
-                            &self.raw_scroll,
-                        ))
-                    })
-                    .when(!wrap_raw_lines, |this| {
-                        this.vertical_scrollbar(&self.raw_scroll)
-                            .horizontal_scrollbar(&self.raw_scroll)
-                    }),
+                    .child(body),
             )
-            .when(self.lines.is_empty(), |this| {
+            .when(self.doc.pretty.is_empty(), |this| {
                 this.child(chrome::empty_state(
                     IconName::FileText,
                     tr!("Empty document"),
@@ -1008,77 +1167,6 @@ impl DocView {
                 ))
             })
             .into_any_element()
-    }
-
-    fn raw_nowrap_width(&self, window: &mut Window, cx: &mut Context<Self>) -> Pixels {
-        let settings = crate::views::settings::settings(cx);
-        let mono = settings.mono_family(cx);
-        json_text::nowrap_width(
-            &self.lines,
-            self.raw_widest_line,
-            self.line_h,
-            settings.line_numbers,
-            &mono,
-            window,
-        )
-    }
-
-    fn render_raw_rows(
-        &mut self,
-        range: Range<usize>,
-        nowrap_width: Pixels,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        range
-            .map(|ix| self.render_raw_row(ix, false, Some(nowrap_width), window, cx))
-            .collect()
-    }
-
-    fn render_wrapped_raw_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        json_text::render_wrapped_list(
-            "wrapped-raw-scroll-bounce",
-            &self.raw_list,
-            cx.entity(),
-            |doc_view, ix, window, cx| doc_view.render_raw_row(ix, true, None, window, cx),
-        )
-    }
-
-    fn render_raw_row(
-        &self,
-        ix: usize,
-        wrap: bool,
-        nowrap_width: Option<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let settings = crate::views::settings::settings(cx);
-        let mode = if wrap {
-            JsonTextMode::Wrapped
-        } else if let Some(width) = nowrap_width {
-            JsonTextMode::Scrollable { width }
-        } else {
-            JsonTextMode::Clipped
-        };
-        JsonTextView::new(JsonTextViewProps {
-            id: None,
-            ix,
-            lines: self.lines.clone(),
-            line_h: self.line_h,
-            mode,
-            gutter: if settings.line_numbers {
-                JsonTextGutter::Dynamic
-            } else {
-                JsonTextGutter::Hidden
-            },
-            marker_column: false,
-            active: self.linked == Some(ix),
-            marker: None,
-            border_color: None,
-            on_click: None,
-        })
-        .render(window, cx)
-        .into_any_element()
     }
 
     // ----- right: tree panel -----
@@ -1137,7 +1225,7 @@ impl DocView {
                         tr!("Expand all"),
                         chrome::shortcut_suffix(&ExpandAll, window)
                     ))
-                    .on_click(cx.listener(|this, _, _, cx| this.expand_all(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.expand_tree_all(cx)))
                     .into_any_element(),
                 Button::new("collapse-all")
                     .icon(IconName::ChevronsDownUp)
@@ -1148,7 +1236,7 @@ impl DocView {
                         tr!("Collapse all"),
                         chrome::shortcut_suffix(&CollapseAll, window)
                     ))
-                    .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.collapse_tree_all(cx)))
                     .into_any_element(),
             ],
             cx,
@@ -1178,25 +1266,25 @@ impl DocView {
             })),
             on_select_up: Some(Rc::new({
                 let doc_view = doc_view.clone();
-                move |_, cx| {
+                move |window, cx| {
                     let _ = doc_view.update(cx, |doc_view, cx| {
-                        doc_view.move_tree_selection(-1, cx);
+                        doc_view.move_tree_selection(-1, window, cx);
                     });
                 }
             })),
             on_select_down: Some(Rc::new({
                 let doc_view = doc_view.clone();
-                move |_, cx| {
+                move |window, cx| {
                     let _ = doc_view.update(cx, |doc_view, cx| {
-                        doc_view.move_tree_selection(1, cx);
+                        doc_view.move_tree_selection(1, window, cx);
                     });
                 }
             })),
             on_select_left: Some(Rc::new({
                 let doc_view = doc_view.clone();
-                move |_, cx| {
+                move |window, cx| {
                     let _ = doc_view.update(cx, |doc_view, cx| {
-                        doc_view.collapse_tree_selection(cx);
+                        doc_view.collapse_tree_selection(window, cx);
                     });
                 }
             })),

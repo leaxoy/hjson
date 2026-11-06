@@ -4,7 +4,7 @@ version = "0.1.2"
 edition = "2024"
 
 [dependencies]
-gpui-kit = "0.9.0"
+gpui-kit = { version = "0.9.0", features = ["tree-sitter"] }
 # Direct only to switch on the inspector hooks the devtools panel reads; the
 # crate itself is the same gpui-pre 0.3 gpui-kit already builds.
 gpui = { package = "gpui-pre", version = "0.3", features = ["inspector"] }
@@ -18,7 +18,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # Settings persistence.
 dirs = "7"
-json-patch = "4.2.0"
+json-patch = "5"
 rust-i18n = "4"
 sys-locale = "0.3"
 
