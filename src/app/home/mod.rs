@@ -1,15 +1,15 @@
 use super::{FetchUrl, HJsonApp, ManualInput, OpenFile, OpenSample, PasteJson};
 use crate::components::chrome;
 use crate::components::source_menu::{LoadMethod, LoadTarget, open_manual_dialog, open_url_dialog};
-use crate::document::{self, LoadedDocument, SourceKind};
+use crate::document::{LoadedDocument, SourceKind};
 use crate::error::{AppError, Status};
 use crate::tr;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, img, px,
+    AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, img, px,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -66,28 +66,11 @@ impl HomeView {
     }
 
     pub fn open_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = cx.read_from_clipboard().and_then(|item| item.text());
-        match text {
-            Some(text) if !text.trim().is_empty() => match document::from_clipboard(text) {
-                Ok(document) => {
-                    let _ = self.submit(document, window, cx);
-                }
-                Err(err) => self.set_status(false, err.message(), cx),
-            },
-            Some(_) => self.set_status(false, tr!("The clipboard is empty"), cx),
-            None => self.set_status(false, tr!("No text on the clipboard"), cx),
-        }
-        cx.notify();
+        self.apply_load((), LoadMethod::Clipboard, window, cx);
     }
 
     pub fn open_manual(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match document::from_manual(text.to_string()) {
-            Ok(document) => {
-                let _ = self.submit(document, window, cx);
-            }
-            Err(err) => self.set_status(false, err.message(), cx),
-        }
-        cx.notify();
+        self.apply_load((), LoadMethod::Manual(text.to_string()), window, cx);
     }
 
     /// Ask for a URL in a modal, then fetch it. The dialog lives in
@@ -105,128 +88,75 @@ impl HomeView {
     }
 
     pub fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match document::from_sample() {
-            Ok(document) => {
-                let _ = self.submit(document, window, cx);
-            }
-            Err(err) => self.set_status(false, err.message(), cx),
-        }
-        cx.notify();
+        self.apply_load((), LoadMethod::Sample, window, cx);
     }
 
     pub fn open_doc(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.app.update(cx, |app, cx| app.open_doc(id, window, cx));
+        self.apply_load((), LoadMethod::History(id), window, cx);
     }
 
     pub fn fetch_url(
         &mut self,
         url: String,
         custom_title: Option<String>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let url = url.trim().to_string();
-        if url.is_empty() {
-            self.set_status(false, tr!("Enter a URL").to_string(), cx);
-            cx.notify();
-            return;
-        }
-        self.status = Some(Status::success(
-            tr!("Requesting %{url} …", url = url.clone()).to_string(),
-        ));
-        cx.notify();
-        let task =
-            cx.background_spawn(async move { document::from_url(url.clone(), custom_title) });
-
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(document) => {
-                    let url = document.url.clone().unwrap_or_default();
-                    match this.submit(document, window, cx) {
-                        Ok(_) => this.set_status(
-                            true,
-                            tr!("Loaded %{url}", url = url.clone()).to_string(),
-                            cx,
-                        ),
-                        // submit already surfaced the failure as a notification.
-                        Err(_) => {}
-                    }
-                    cx.notify();
-                }
-                Err(e) => {
-                    this.set_status(false, e.message(), cx);
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.apply_load(
+            (),
+            LoadMethod::FetchUrl {
+                url,
+                title: custom_title,
+            },
+            window,
+            cx,
+        );
     }
 
-    pub fn pick_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let outcome = match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                Ok(Ok(None)) => None,
-                Ok(Err(e)) => {
-                    this.update(cx, |this, cx| {
-                        this.set_status(false, AppError::open_file(e).message(), cx);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-                Err(_) => None,
-            };
-            let Some(path) = outcome else { return };
-            let read = cx.background_spawn(async move { document::from_file(path) });
-            let read_result = read.await;
-            this.update_in(cx, |this, window, cx| {
-                match read_result {
-                    Ok(document) => match this.submit(document, window, cx) {
-                        Ok(_) => this.set_status(true, tr!("File opened"), cx),
-                        // submit already surfaced the failure as a notification.
-                        Err(_) => {}
-                    },
-                    Err(e) => this.set_status(false, e.message(), cx),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    pub fn pick_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_load((), LoadMethod::PickFile, window, cx);
     }
 }
 
 impl LoadTarget for HomeView {
     type Slot = ();
 
-    /// The home page has one target — itself — so the shared load menu and the
-    /// import list both land here.
-    fn apply_load(
+    fn history_app(&self) -> Option<&WeakEntity<HJsonApp>> {
+        Some(&self.app)
+    }
+
+    fn load_started(&mut self, _slot: (), method: &LoadMethod, cx: &mut Context<Self>) {
+        if let LoadMethod::FetchUrl { url, .. } = method {
+            self.status = Some(Status::success(
+                tr!("Requesting %{url} …", url = url.clone()).to_string(),
+            ));
+            cx.notify();
+        }
+    }
+
+    fn load_succeeded(
         &mut self,
         _slot: (),
         method: LoadMethod,
+        document: LoadedDocument,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match method {
-            LoadMethod::Clipboard => self.open_clipboard(window, cx),
-            LoadMethod::PickFile => self.pick_file(window, cx),
-            LoadMethod::FetchUrl { url, title } => self.fetch_url(url, title, window, cx),
-            LoadMethod::Manual(text) => self.open_manual(&text, window, cx),
-            LoadMethod::Sample => self.open_sample(window, cx),
-            LoadMethod::History(id) => self.open_doc(id, window, cx),
-            // Nothing to re-fetch: a home tab has no document of its own.
-            LoadMethod::RefetchUrl => {}
+        let loaded_url = document.url.clone().unwrap_or_default();
+        if self.submit(document, window, cx).is_err() {
+            return;
         }
+        match method {
+            LoadMethod::FetchUrl { .. } => {
+                self.set_status(true, tr!("Loaded %{url}", url = loaded_url).to_string(), cx);
+            }
+            LoadMethod::PickFile => self.set_status(true, tr!("File opened"), cx),
+            _ => {}
+        }
+    }
+
+    fn load_failed(&mut self, _slot: (), error: AppError, cx: &mut Context<Self>) {
+        self.set_status(false, error.message(), cx);
     }
 }
 

@@ -2,7 +2,7 @@
 //! sources the home page offers — clipboard, file, URL, manual input, sample,
 //! session history — and draws them with the same labels and icons.
 
-use std::{cell::Cell, sync::Arc};
+use std::{borrow::Borrow as _, cell::Cell, sync::Arc};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
@@ -17,12 +17,13 @@ use gpui_kit::{
 };
 
 use crate::app::HJsonApp;
-use crate::document::SourceKind;
+use crate::document::{self, LoadedDocument, SourceKind};
+use crate::error::AppError;
 use crate::json_model::JsonTree;
 
 /// One of the import methods, mirroring the home page.
 #[derive(Clone)]
-pub enum LoadMethod {
+pub(crate) enum LoadMethod {
     /// Read the clipboard.
     Clipboard,
     /// Ask for a file with the native picker.
@@ -68,7 +69,7 @@ impl LoadMethod {
 
 /// A page that loads documents into one or more slots. `Slot` is `()` for the
 /// document view's single document and a side index for the diff pages.
-pub trait LoadTarget: Sized + 'static {
+pub(crate) trait LoadTarget: Sized + 'static {
     type Slot: Copy + 'static;
 
     fn apply_load(
@@ -77,15 +78,38 @@ pub trait LoadTarget: Sized + 'static {
         method: LoadMethod,
         window: &mut Window,
         cx: &mut Context<Self>,
+    ) {
+        run_load(self, slot, method, window, cx);
+    }
+
+    fn history_app(&self) -> Option<&WeakEntity<HJsonApp>> {
+        None
+    }
+
+    fn refetch_url(&self, _slot: Self::Slot) -> Option<(String, Option<String>)> {
+        None
+    }
+
+    fn load_started(&mut self, _slot: Self::Slot, _method: &LoadMethod, _cx: &mut Context<Self>) {}
+
+    fn load_succeeded(
+        &mut self,
+        slot: Self::Slot,
+        method: LoadMethod,
+        document: LoadedDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     );
+
+    fn load_failed(&mut self, slot: Self::Slot, error: AppError, cx: &mut Context<Self>);
 }
 
 /// One entry of the session import history.
-pub type HistoryItem = (u64, SharedString, SourceKind);
+pub(crate) type HistoryItem = (u64, SharedString, SourceKind);
 
 /// What a menu can offer at the moment it opens.
 #[derive(Clone)]
-pub struct LoadOptions {
+pub(crate) struct LoadOptions {
     /// The current source URL, when the document came over HTTP.
     pub url: Option<String>,
     /// Session history, newest first.
@@ -93,7 +117,7 @@ pub struct LoadOptions {
 }
 
 /// Live snapshot of the app-owned import history.
-pub fn history_of(app: &WeakEntity<HJsonApp>, cx: &gpui_kit::App) -> Vec<HistoryItem> {
+pub(crate) fn history_of(app: &WeakEntity<HJsonApp>, cx: &gpui_kit::App) -> Vec<HistoryItem> {
     let Some(app) = app.upgrade() else {
         return Vec::new();
     };
@@ -105,7 +129,7 @@ pub fn history_of(app: &WeakEntity<HJsonApp>, cx: &gpui_kit::App) -> Vec<History
         .collect()
 }
 
-pub fn prepared_doc_of(
+pub(crate) fn prepared_doc_of(
     app: &WeakEntity<HJsonApp>,
     cx: &gpui_kit::App,
     id: u64,
@@ -127,11 +151,166 @@ pub fn prepared_doc_of(
     ))
 }
 
+fn run_load<T: LoadTarget>(
+    target: &mut T,
+    slot: T::Slot,
+    method: LoadMethod,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    match method {
+        LoadMethod::Clipboard => {
+            let result = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .map(|text| text.trim().to_string())
+                .ok_or_else(|| AppError::plain(tr!("No text on the clipboard")))
+                .and_then(|text| {
+                    if text.is_empty() {
+                        Err(AppError::plain(tr!("The clipboard is empty")))
+                    } else {
+                        document::from_clipboard(text)
+                    }
+                });
+            finish_load(target, slot, LoadMethod::Clipboard, result, window, cx);
+        }
+        LoadMethod::PickFile => load_file(slot, cx),
+        LoadMethod::RefetchUrl => {
+            if let Some((url, title)) = target.refetch_url(slot) {
+                run_load(
+                    target,
+                    slot,
+                    LoadMethod::FetchUrl { url, title },
+                    window,
+                    cx,
+                );
+            }
+        }
+        LoadMethod::FetchUrl { url, title } => load_url(target, slot, url, title, cx),
+        LoadMethod::Manual(text) => {
+            let result = document::from_manual(text);
+            finish_load(
+                target,
+                slot,
+                LoadMethod::Manual(String::new()),
+                result,
+                window,
+                cx,
+            );
+        }
+        LoadMethod::Sample => {
+            let result = document::from_sample();
+            finish_load(target, slot, LoadMethod::Sample, result, window, cx);
+        }
+        LoadMethod::History(id) => {
+            let result = load_history(target, id, cx);
+            finish_load(target, slot, LoadMethod::History(id), result, window, cx);
+        }
+    }
+}
+
+fn finish_load<T: LoadTarget>(
+    target: &mut T,
+    slot: T::Slot,
+    method: LoadMethod,
+    result: Result<LoadedDocument, AppError>,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    match result {
+        Ok(document) => target.load_succeeded(slot, method, document, window, cx),
+        Err(err) => target.load_failed(slot, err, cx),
+    }
+    cx.notify();
+}
+
+fn load_file<T: LoadTarget>(slot: T::Slot, cx: &mut Context<T>) {
+    let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    });
+    cx.spawn(async move |this, cx| {
+        let path = match receiver.await {
+            Ok(Ok(Some(paths))) => paths.into_iter().next(),
+            Ok(Ok(None)) | Err(_) => None,
+            Ok(Err(err)) => {
+                this.update(cx, |this, cx| {
+                    this.load_failed(slot, AppError::open_file(err), cx);
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+        };
+        let Some(path) = path else { return };
+        let read = cx.background_spawn(async move { document::from_file(path) });
+        let result = read.await;
+        this.update_in(cx, |this, window, cx| {
+            finish_load(this, slot, LoadMethod::PickFile, result, window, cx)
+        })
+        .ok();
+    })
+    .detach();
+}
+
+fn load_url<T: LoadTarget>(
+    target: &mut T,
+    slot: T::Slot,
+    url: String,
+    title: Option<String>,
+    cx: &mut Context<T>,
+) {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        target.load_failed(slot, AppError::plain(tr!("Enter a URL")), cx);
+        cx.notify();
+        return;
+    }
+
+    let method = LoadMethod::FetchUrl {
+        url: url.clone(),
+        title: title.clone(),
+    };
+    target.load_started(slot, &method, cx);
+    cx.notify();
+
+    let http_client = {
+        let app: &gpui_kit::App = (&*cx).borrow();
+        app.http_client()
+    };
+    let task =
+        cx.background_spawn(async move { document::from_url(http_client, url, title).await });
+    cx.spawn(async move |this, cx| {
+        let result = task.await;
+        this.update_in(cx, |this, window, cx| {
+            finish_load(this, slot, method, result, window, cx)
+        })
+        .ok();
+    })
+    .detach();
+}
+
+fn load_history<T: LoadTarget>(
+    target: &T,
+    id: u64,
+    cx: &mut Context<T>,
+) -> Result<LoadedDocument, AppError> {
+    let Some(app) = target.history_app() else {
+        return Err(AppError::plain(tr!("That entry is no longer in the list")));
+    };
+    let Some((kind, title, text, url, parsed)) = prepared_doc_of(app, cx, id) else {
+        return Err(AppError::plain(tr!("That entry is no longer in the list")));
+    };
+    document::from_history(kind, title.to_string(), text, url, parsed)
+}
+
 /// The one load control a header uses: an icon button whose menu holds every
 /// source, wired to one slot of the page. Header bands are narrow, so the
 /// button wears no label; every caller gets the same JSON-document glyph and
 /// the tooltip carries the page-specific context.
-pub fn header_load_button<T: LoadTarget>(
+pub(crate) fn header_load_button<T: LoadTarget>(
     id: impl Into<gpui_kit::ElementId>,
     tooltip: impl Into<SharedString>,
     slot: T::Slot,
@@ -150,7 +329,7 @@ pub fn header_load_button<T: LoadTarget>(
 }
 
 /// Append every load method to `menu`, wired to `target`'s `slot`.
-pub fn add_load_items<T: LoadTarget>(
+pub(crate) fn add_load_items<T: LoadTarget>(
     menu: PopupMenu,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
@@ -276,7 +455,7 @@ fn dialog_item<T: LoadTarget>(
 ///
 /// Also the home page's "Fetch from URL" entry: pages with no URL of their own
 /// pass `initial: None`.
-pub fn open_url_dialog<T: LoadTarget>(
+pub(crate) fn open_url_dialog<T: LoadTarget>(
     target: &WeakEntity<T>,
     slot: T::Slot,
     initial: Option<String>,
@@ -335,7 +514,7 @@ pub fn open_url_dialog<T: LoadTarget>(
 }
 
 /// Ask for raw JSON text, then load it through [`LoadMethod::Manual`].
-pub fn open_manual_dialog<T: LoadTarget>(
+pub(crate) fn open_manual_dialog<T: LoadTarget>(
     target: &WeakEntity<T>,
     slot: T::Slot,
     window: &mut Window,

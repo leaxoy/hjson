@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
+pub(crate) mod hints;
 pub(crate) mod pretty;
 
 /// The JSON type of a value, used for picking colors and icons in the tree.

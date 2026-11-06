@@ -45,10 +45,12 @@ use crate::components::json_tree::{
     self, JsonTreeView, JsonTreeViewProps, TreeRow, build_tree_rows, tree_list_splice, type_color,
     type_icon,
 };
-use crate::components::source_menu::{self, LoadMethod, LoadOptions, LoadTarget};
+use crate::components::source_menu::{self, LoadOptions};
 use crate::document::{self, LoadedDocument, SourceKind};
 use crate::error::{AppError, Status};
 use crate::json_model::{JsonTree, JsonType};
+
+mod loading;
 
 const TREE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 const RAW_SYNC_DEBOUNCE: Duration = Duration::from_millis(180);
@@ -251,9 +253,8 @@ impl DocView {
     // ---------- actions ----------
 
     fn schedule_filter(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TREE_SEARCH_DEBOUNCE).await;
-            let _ = this.update(cx, |this, cx| this.apply_filter(query, cx));
+        self.search_task = Some(spawn_after(cx, TREE_SEARCH_DEBOUNCE, move |this, cx| {
+            this.apply_filter(query, cx);
         }));
     }
 
@@ -266,13 +267,10 @@ impl DocView {
     fn schedule_raw_sync(&mut self, text: String, cx: &mut Context<Self>) {
         self.raw_sync_generation = self.raw_sync_generation.wrapping_add(1);
         let generation = self.raw_sync_generation;
-        self.raw_sync_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(RAW_SYNC_DEBOUNCE).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.raw_sync_generation == generation {
-                    this.apply_raw_sync(text, cx);
-                }
-            });
+        self.raw_sync_task = Some(spawn_after(cx, RAW_SYNC_DEBOUNCE, move |this, cx| {
+            if this.raw_sync_generation == generation {
+                this.apply_raw_sync(text, cx);
+            }
         }));
     }
 
@@ -585,14 +583,11 @@ impl DocView {
             let toast_generation = self.toast_generation;
             self.toast = Some(Status::from_parts(true, text));
             cx.notify();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(TOAST_DURATION).await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.toast_generation == toast_generation {
-                        this.toast = None;
-                        cx.notify();
-                    }
-                });
+            spawn_after(cx, TOAST_DURATION, move |this, cx| {
+                if this.toast_generation == toast_generation {
+                    this.toast = None;
+                    cx.notify();
+                }
             })
             .detach();
         } else {
@@ -619,80 +614,6 @@ impl DocView {
             Err(err) => self.say(false, AppError::load(err).message(), cx),
         }
         cx.notify();
-    }
-
-    /// Replace this document with the clipboard contents.
-    fn load_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .map(|t| t.trim().to_string());
-        match text {
-            Some(text) if !text.is_empty() => match document::from_clipboard(text) {
-                Ok(document) => self.replace_with(document, window, cx),
-                Err(err) => self.say(false, err.message(), cx),
-            },
-            Some(_) => self.say(false, tr!("The clipboard is empty"), cx),
-            None => self.say(false, tr!("No text on the clipboard"), cx),
-        }
-    }
-
-    /// Replace this document with a file picked from disk.
-    fn load_file(&mut self, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let outcome = match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
-            let Some(path) = outcome else { return };
-            let read = cx.background_spawn(async move { document::from_file(path) });
-            let result = read.await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(document) => this.replace_with(document, window, cx),
-                Err(e) => this.say(false, e.message(), cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Replace this document with the body of `url`.
-    fn load_fetch(&mut self, url: String, custom_title: Option<String>, cx: &mut Context<Self>) {
-        self.say(
-            true,
-            tr!("Requesting %{url} …", url = url.clone()).to_string(),
-            cx,
-        );
-        let task = cx.background_spawn(async move { document::from_url(url, custom_title) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(document) => this.replace_with(document, window, cx),
-                Err(e) => this.say(false, e.message(), cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Replace this document with one from the session history.
-    fn load_history(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let found = source_menu::prepared_doc_of(&self.app, cx, id);
-        match found {
-            Some((kind, title, text, url, parsed)) => {
-                match document::from_history(kind, title.to_string(), text, url, parsed) {
-                    Ok(document) => self.replace_with(document, window, cx),
-                    Err(err) => self.say(false, err.message(), cx),
-                }
-            }
-            None => self.say(false, tr!("That entry is no longer in the list"), cx),
-        }
     }
 
     fn open_node_in_new_tab(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -752,38 +673,6 @@ impl DocView {
     }
 }
 
-impl LoadTarget for DocView {
-    type Slot = ();
-
-    fn apply_load(
-        &mut self,
-        _slot: (),
-        method: LoadMethod,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match method {
-            LoadMethod::Clipboard => self.load_clipboard(window, cx),
-            LoadMethod::PickFile => self.load_file(cx),
-            LoadMethod::RefetchUrl => {
-                if let Some(url) = self.url.clone() {
-                    self.load_fetch(url, Some(self.title.to_string()), cx);
-                }
-            }
-            LoadMethod::FetchUrl { url, title } => self.load_fetch(url, title, cx),
-            LoadMethod::Manual(text) => match document::from_manual(text) {
-                Ok(document) => self.replace_with(document, window, cx),
-                Err(err) => self.say(false, err.message(), cx),
-            },
-            LoadMethod::Sample => match document::from_sample() {
-                Ok(document) => self.replace_with(document, window, cx),
-                Err(err) => self.say(false, err.message(), cx),
-            },
-            LoadMethod::History(id) => self.load_history(id, window, cx),
-        }
-    }
-}
-
 /// Copy through the document view so it can show a toast. Lives outside `DocView`
 /// so context-menu closures (which only capture the weak handle) can use it.
 fn copy_via_doc_view(
@@ -838,6 +727,17 @@ fn node_ids_by_path(doc: &JsonTree) -> HashMap<String, usize> {
         .enumerate()
         .map(|(id, _)| (doc.json_path(id), id))
         .collect()
+}
+
+fn spawn_after<T: 'static>(
+    cx: &mut Context<T>,
+    delay: Duration,
+    run: impl FnOnce(&mut T, &mut Context<T>) + 'static,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        let _ = this.update(cx, run);
+    })
 }
 
 /// What "Copy value" should copy: raw scalar text, or the pretty subtree.

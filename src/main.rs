@@ -1,7 +1,13 @@
+use std::sync::Arc;
+
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use reqwest_client::ReqwestClient;
 
 fn main() {
     gpui_kit::application()
+        .with_http_client(Arc::new(
+            ReqwestClient::user_agent("HJson").expect("failed to initialize HTTP client"),
+        ))
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
             gpui_kit::init(cx);

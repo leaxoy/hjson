@@ -27,13 +27,13 @@ use crate::components::json_text::{
     JsonTextClickHandler, JsonTextGutter, JsonTextMarker, JsonTextMode, JsonTextView,
     JsonTextViewProps,
 };
-use crate::document::SourceKind;
-use crate::document::{self, LoadedDocument};
+use crate::document::{LoadedDocument, SourceKind};
 use crate::error::Status;
 use crate::json_model::JsonTree;
 use crate::syntax::{Span, highlight};
 
 mod algo;
+mod loading;
 pub(crate) use self::algo::DiffKind;
 use self::algo::{DiffEntry, DiffOutput, diff_values};
 
@@ -386,128 +386,6 @@ impl DiffView {
             chrome::notify_failure(text, cx);
         }
     }
-
-    /// Replace one side with the clipboard contents.
-    fn load_clipboard(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        let text = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .map(|t| t.trim().to_string());
-        match text {
-            Some(text) if !text.is_empty() => match document::from_clipboard(text) {
-                Ok(document) => self.fill_source(side, document.into(), cx),
-                Err(err) => self.note_side(side, false, err.message(), cx),
-            },
-            Some(_) => self.note_side(side, false, tr!("The clipboard is empty"), cx),
-            None => self.note_side(side, false, tr!("No text on the clipboard"), cx),
-        }
-    }
-
-    /// Replace one side with a file picked from disk.
-    fn load_file(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let outcome = match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
-            let Some(path) = outcome else { return };
-            let read = cx.background_spawn(async move { document::from_file(path) });
-            let result = read.await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(document) => this.fill_source(side, document.into(), cx),
-                Err(e) => this.note_side(side, false, e.message(), cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Fetch `url` and put the response into one side.
-    fn load_fetch(
-        &mut self,
-        side: SideIx,
-        url: String,
-        custom_title: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let url = url.trim().to_string();
-        if url.is_empty() {
-            self.note_side(side, false, tr!("Enter a URL"), cx);
-            return;
-        }
-        // Only the config page tracks an in-flight request.
-        if let DiffPhase::Config(cfg) = &mut self.phase {
-            cfg.sides[side].busy = true;
-            cfg.sides[side].note = Some(Status::success(
-                tr!("Requesting %{url} …", url = url.clone()).to_string(),
-            ));
-        }
-        cx.notify();
-
-        let task = cx.background_spawn(async move { document::from_url(url, custom_title) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(document) => this.fill_source(side, document.into(), cx),
-                Err(e) => this.note_side(side, false, e.message(), cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Re-fetch the URL one side already came from.
-    fn load_refetch(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        let source = match &self.phase {
-            DiffPhase::Config(cfg) => (
-                cfg.sides[side].url.clone(),
-                cfg.sides[side].title.as_ref().map(ToString::to_string),
-            ),
-            DiffPhase::Result(res) => (
-                res.sources[side].url.clone(),
-                Some(res.sources[side].title.to_string()),
-            ),
-        };
-        if let (Some(url), title) = source {
-            self.load_fetch(side, url, title, cx);
-        }
-    }
-
-    /// Replace one side with a document from the session history.
-    fn load_history(&mut self, side: SideIx, id: u64, cx: &mut Context<Self>) {
-        let found = crate::components::source_menu::prepared_doc_of(&self.app, cx, id);
-        match found {
-            Some((kind, title, text, url, parsed)) => {
-                match document::from_history(kind, title.to_string(), text, url, parsed) {
-                    Ok(document) => self.fill_source(side, document.into(), cx),
-                    Err(err) => self.note_side(side, false, err.message(), cx),
-                }
-            }
-            None => self.note_side(side, false, tr!("That entry is no longer in the list"), cx),
-        }
-    }
-
-    /// Replace one side with text typed into the manual-input dialog.
-    fn load_manual(&mut self, side: SideIx, text: String, cx: &mut Context<Self>) {
-        match document::from_manual(text) {
-            Ok(document) => self.fill_source(side, document.into(), cx),
-            Err(err) => self.note_side(side, false, err.message(), cx),
-        }
-    }
-
-    /// Replace one side with the built-in sample document.
-    fn load_sample(&mut self, side: SideIx, cx: &mut Context<Self>) {
-        match document::from_sample() {
-            Ok(document) => self.fill_source(side, document.into(), cx),
-            Err(err) => self.note_side(side, false, err.message(), cx),
-        }
-    }
 }
 
 impl From<SideSource> for LoadedDocument {
@@ -518,29 +396,6 @@ impl From<SideSource> for LoadedDocument {
             text: source.text,
             url: source.url,
             parsed: source.parsed,
-        }
-    }
-}
-
-impl crate::components::source_menu::LoadTarget for DiffView {
-    type Slot = SideIx;
-
-    fn apply_load(
-        &mut self,
-        side: SideIx,
-        method: crate::components::source_menu::LoadMethod,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::components::source_menu::LoadMethod;
-        match method {
-            LoadMethod::Clipboard => self.load_clipboard(side, cx),
-            LoadMethod::PickFile => self.load_file(side, cx),
-            LoadMethod::RefetchUrl => self.load_refetch(side, cx),
-            LoadMethod::FetchUrl { url, title } => self.load_fetch(side, url, title, cx),
-            LoadMethod::Manual(text) => self.load_manual(side, text, cx),
-            LoadMethod::Sample => self.load_sample(side, cx),
-            LoadMethod::History(id) => self.load_history(side, id, cx),
         }
     }
 }

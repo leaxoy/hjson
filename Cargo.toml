@@ -4,6 +4,7 @@ version = "0.1.2"
 edition = "2024"
 
 [dependencies]
+futures = "0.3"
 gpui-kit = { version = "0.9.0", features = ["tree-sitter"] }
 # Direct only to switch on the inspector hooks the devtools panel reads; the
 # crate itself is the same gpui-pre 0.3 gpui-kit already builds.
@@ -11,10 +12,8 @@ gpui = { package = "gpui-pre", version = "0.3", features = ["inspector"] }
 # Inspector overlay (element picker, box model, styles). Initialized only in
 # debug builds — see main.rs.
 gpui-devtools = "0.5"
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.11" }
 serde_json = { version = "1", features = ["preserve_order"] }
-ureq = { version = "3", features = ["json"] }
-anyhow = "1"
-uuid = { version = "1", features = ["v4"] }
 
 # Settings persistence.
 dirs = "7"

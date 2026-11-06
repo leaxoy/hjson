@@ -29,14 +29,16 @@ pub struct DocEntry {
     pub opened_at: Instant,
 }
 
+struct RecordedDocument {
+    id: u64,
+    title: SharedString,
+    kind: SourceKind,
+    url: Option<String>,
+    parsed: Arc<JsonTree>,
+}
+
 impl HJsonApp {
-    /// Open a loaded document in the active home tab or a new adjacent tab.
-    pub(crate) fn open_document(
-        &mut self,
-        document: LoadedDocument,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> u64 {
+    fn record_loaded_document(&mut self, document: LoadedDocument) -> RecordedDocument {
         let LoadedDocument {
             kind,
             title,
@@ -44,36 +46,57 @@ impl HJsonApp {
             url,
             parsed,
         } = document;
+
         self.running_doc_id += 1;
         let id = self.running_doc_id;
-        // A single-line preview keeps the history list informative at a glance.
-        let preview: String = text
-            .replace(['\n', '\r', '\t'], " ")
-            .chars()
-            .take(96)
-            .collect();
-        let size = text.len();
-        let doc_view_url = url.clone();
+        let title: SharedString = title.into();
+        let view = RecordedDocument {
+            id,
+            title: title.clone(),
+            kind,
+            url: url.clone(),
+            parsed: parsed.clone(),
+        };
         let entry = DocEntry {
             id,
-            title: title.into(),
+            title,
             kind,
             url,
+            size: text.len(),
+            preview: document_preview(&text),
             text,
             parsed: Arc::downgrade(&parsed),
-            size,
-            preview,
             opened_at: Instant::now(),
         };
-        let title = entry.title.clone();
+
         self.docs.insert(0, entry);
         if self.docs.len() > 50 {
             self.docs.pop();
         }
+        view
+    }
+
+    /// Open a loaded document in the active home tab or a new adjacent tab.
+    pub(crate) fn open_document(
+        &mut self,
+        document: LoadedDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let document = self.record_loaded_document(document);
 
         let weak = cx.weak_entity();
-        let doc_view =
-            cx.new(|cx| DocView::new(weak, &title, kind, doc_view_url, parsed, window, cx));
+        let doc_view = cx.new(|cx| {
+            DocView::new(
+                weak,
+                &document.title,
+                document.kind,
+                document.url,
+                document.parsed,
+                window,
+                cx,
+            )
+        });
 
         if matches!(self.tabs.get(self.active), Some(TabPage::Home(_))) {
             // The import page hands itself over to the parsed document.
@@ -84,7 +107,7 @@ impl HJsonApp {
             self.active += 1;
         }
         cx.notify();
-        id
+        document.id
     }
 
     /// Replace one document tab while preserving its position.
@@ -102,46 +125,23 @@ impl HJsonApp {
         else {
             return Err(tr!("Tab closed").to_string());
         };
-        let LoadedDocument {
-            kind,
-            title,
-            text,
-            url,
-            parsed,
-        } = document;
-
-        self.running_doc_id += 1;
-        let id = self.running_doc_id;
-        let preview: String = text
-            .replace(['\n', '\r', '\t'], " ")
-            .chars()
-            .take(96)
-            .collect();
-        let size = text.len();
-        let new_url = url.clone();
-        let entry = DocEntry {
-            id,
-            title: title.into(),
-            kind,
-            url,
-            text,
-            parsed: Arc::downgrade(&parsed),
-            size,
-            preview,
-            opened_at: Instant::now(),
-        };
-        let title = entry.title.clone();
-        self.docs.insert(0, entry);
-        if self.docs.len() > 50 {
-            self.docs.pop();
-        }
+        let document = self.record_loaded_document(document);
 
         let weak = cx.weak_entity();
-        let new_doc_view =
-            cx.new(|cx| DocView::new(weak, &title, kind, new_url, parsed, window, cx));
+        let new_doc_view = cx.new(|cx| {
+            DocView::new(
+                weak,
+                &document.title,
+                document.kind,
+                document.url,
+                document.parsed,
+                window,
+                cx,
+            )
+        });
         self.tabs[ix] = TabPage::Doc(new_doc_view);
         cx.notify();
-        Ok(id)
+        Ok(document.id)
     }
 
     pub fn open_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -248,4 +248,11 @@ impl HJsonApp {
             Err(err) => self.note_home(false, err.message(), cx),
         }
     }
+}
+
+fn document_preview(text: &str) -> String {
+    text.replace(['\n', '\r', '\t'], " ")
+        .chars()
+        .take(96)
+        .collect()
 }

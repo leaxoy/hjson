@@ -10,6 +10,8 @@ use super::SourceKind;
 use crate::error::AppError;
 use crate::json_model::JsonTree;
 use crate::tr;
+use futures::AsyncReadExt as _;
+use gpui::http_client::{AsyncBody, HttpClient};
 
 /// A fully loaded JSON document, ready to be inserted into a tab or diff side.
 pub(crate) struct LoadedDocument {
@@ -42,7 +44,8 @@ pub(crate) fn from_file(path: PathBuf) -> Result<LoadedDocument, AppError> {
 }
 
 /// Fetch and validate a document from a URL.
-pub(crate) fn from_url(
+pub(crate) async fn from_url(
+    http_client: Arc<dyn HttpClient>,
     url: String,
     custom_title: Option<String>,
 ) -> Result<LoadedDocument, AppError> {
@@ -50,10 +53,19 @@ pub(crate) fn from_url(
     if url.is_empty() {
         return Err(AppError::load(tr!("Enter a URL")));
     }
-    let response = ureq::get(&url).call().map_err(AppError::request)?;
-    let text = response
-        .into_body()
-        .read_to_string()
+    let response = http_client
+        .get(&url, AsyncBody::empty(), true)
+        .await
+        .map_err(AppError::request)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::request(status));
+    }
+
+    let mut body = response.into_body();
+    let mut text = String::new();
+    body.read_to_string(&mut text)
+        .await
         .map_err(AppError::read_response)?;
     let title = import_title(&url, custom_title);
     from_parts(SourceKind::Url, title, text, Some(url), None)
