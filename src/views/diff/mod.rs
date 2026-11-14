@@ -2,7 +2,7 @@
 //! load button, then show a two-column structural diff. The semantic engine
 //! lives in this module's [`algo`] submodule.
 
-use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc};
+use std::{cell::Cell, collections::BTreeSet, ops::Range, rc::Rc, sync::Arc};
 
 use crate::tr;
 use gpui_kit::assets::IconName;
@@ -10,34 +10,37 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, VirtualListScrollHandle,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{
+        Editor, EditorState, GutterDecoration, GutterDecorationCollection, Indent, Outdent,
+        Position, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+    },
     resizable::{h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
     v_flex, v_virtual_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, RenderOnce, ScrollStrategy, SharedString, Size,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, size,
 };
 
 use crate::app::{DiffNext, DiffPrev};
 use crate::components::chrome;
-use crate::components::json_text::{
-    JsonTextClickHandler, JsonTextGutter, JsonTextMarker, JsonTextMode, JsonTextView,
-    JsonTextViewProps,
-};
 use crate::document::{LoadedDocument, SourceKind};
 use crate::error::Status;
 use crate::json_model::JsonTree;
-use crate::syntax::{Span, highlight};
 
 mod algo;
 mod config;
+mod exemptions;
 mod loading;
 mod result;
 pub(crate) use self::algo::DiffKind;
-use self::algo::{DiffEntry, DiffOutput, diff_values};
+#[cfg(test)]
+use self::algo::diff_values;
+use self::algo::{DiffEntry, DiffOutput, diff_values_with_ignored};
+use gpui_kit::component::WindowExt as _;
 
 /// Which half of the comparison.
 pub type SideIx = usize;
@@ -109,6 +112,8 @@ pub struct DiffView {
     phase: DiffPhase,
     custom_tab_title: Option<SharedString>,
     build_generation: u64,
+    /// Exact field names, scoped to this comparison tab; never JSONPath rules.
+    ignored_fields: BTreeSet<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -147,12 +152,13 @@ struct ResultPhase {
     /// Navigation focus (index into entries), moved by ◀/▶ or a list click.
     current: Option<usize>,
     line_h: f32,
-    sides: [SideLines; 2],
+    sides: [SideEditor; 2],
+    /// Apply navigation after both editors have been created in a window.
+    reveal_current: bool,
+    decoration_state: Option<([Hsla; 4], Option<usize>)>,
     /// Raw inputs (kind / title / url / text) per side — the toolbar's
     /// per-side reload menus swap one of these and re-run the diff.
     sources: [SideSource; 2],
-    scroll_a: VirtualListScrollHandle,
-    scroll_b: VirtualListScrollHandle,
     /// One row per entry in the difference list under the two columns.
     entry_sizes: Rc<Vec<Size<Pixels>>>,
     scroll_entries: VirtualListScrollHandle,
@@ -168,15 +174,18 @@ struct SideSource {
     parsed: Arc<JsonTree>,
 }
 
-/// Per-side rendered payload: syntax spans, gutter markers, entry lookup.
-struct SideLines {
+/// Each side owns one native editor. Its text is exactly the formatted text
+/// whose line anchors the semantic diff returns; no synthetic alignment rows.
+struct SideEditor {
     title: SharedString,
-    lines: Rc<Vec<Vec<Span>>>,
-    /// Gutter marker per line (`None` = unchanged line).
-    marks: Vec<Option<DiffKind>>,
-    /// Line → diff-entry index (for nav highlight).
-    entry_of_line: HashMap<usize, usize>,
-    line_sizes: Rc<Vec<Size<Pixels>>>,
+    pretty: String,
+    line_ranges: Vec<Range<usize>>,
+    marks: Vec<(usize, DiffKind)>,
+    /// Created in the result's first render, where a Window is available.
+    editor: Option<Entity<EditorState>>,
+    gutter: Option<GutterDecorationCollection>,
+    active_range: Option<RangeDecorationCollection>,
+    options: Option<(bool, bool)>,
 }
 
 /// Diff tab label: A ⇆ B when both sides are loaded, otherwise 对比.
@@ -265,21 +274,17 @@ impl ResultPhase {
         let entries = out.entries;
 
         let mut sides = [
-            build_side_lines(sources[0].title.clone(), &out.pretty_a),
-            build_side_lines(sources[1].title.clone(), &out.pretty_b),
+            SideEditor::new(sources[0].title.clone(), out.pretty_a),
+            SideEditor::new(sources[1].title.clone(), out.pretty_b),
         ];
-        for (ix, entry) in entries.iter().enumerate() {
-            for (side, line) in [(0usize, entry.a_line), (1usize, entry.b_line)] {
+        for entry in &entries {
+            for (side, line) in [(SIDE_A, entry.a_line), (SIDE_B, entry.b_line)] {
                 if let Some(line) = line
-                    && let Some(mark) = sides[side].marks.get_mut(line)
+                    && line < sides[side].line_ranges.len()
                 {
-                    *mark = Some(entry.kind);
-                    sides[side].entry_of_line.insert(line, ix);
+                    sides[side].marks.push((line, entry.kind));
                 }
             }
-        }
-        for side in &mut sides {
-            side.line_sizes = Rc::new(vec![size(px(640.), px(line_h)); side.lines.len()]);
         }
 
         let entry_count = entries.len();
@@ -289,8 +294,8 @@ impl ResultPhase {
             line_h,
             sides,
             sources,
-            scroll_a: VirtualListScrollHandle::new(),
-            scroll_b: VirtualListScrollHandle::new(),
+            reveal_current: false,
+            decoration_state: None,
             entry_sizes: Rc::new(vec![size(px(640.), px(DIFF_ROW_H)); entry_count]),
             scroll_entries: VirtualListScrollHandle::new(),
         }
@@ -334,8 +339,13 @@ impl DiffView {
         }
         cx.notify();
 
+        let ignored = self.ignored_fields.clone();
         let task = cx.background_spawn(async move {
-            let output = diff_values(&sources[SIDE_A].parsed.root, &sources[SIDE_B].parsed.root);
+            let output = diff_values_with_ignored(
+                &sources[SIDE_A].parsed.root,
+                &sources[SIDE_B].parsed.root,
+                &ignored,
+            );
             (sources, output)
         });
         cx.spawn(async move |this, cx| {
@@ -344,8 +354,20 @@ impl DiffView {
                 if generation != this.build_generation {
                     return;
                 }
-                this.phase =
-                    DiffPhase::Result(Box::new(ResultPhase::from_output(sources, line_h, output)));
+                let mut next = ResultPhase::from_output(sources, line_h, output);
+                // Changing only exemptions must not reset editor selections,
+                // folds or scrolling. Decoration collections will be refreshed.
+                if let DiffPhase::Result(previous) = &mut this.phase {
+                    for (old, new) in previous.sides.iter_mut().zip(&mut next.sides) {
+                        if old.pretty == new.pretty {
+                            new.editor = old.editor.take();
+                            new.gutter = old.gutter.take();
+                            new.active_range = old.active_range.take();
+                            new.options = old.options;
+                        }
+                    }
+                }
+                this.phase = DiffPhase::Result(Box::new(next));
                 cx.notify();
             });
         })
@@ -400,14 +422,39 @@ impl From<SideSource> for LoadedDocument {
     }
 }
 
-fn build_side_lines(title: SharedString, pretty: &str) -> SideLines {
-    SideLines {
-        title,
-        lines: Rc::new(highlight(pretty)),
-        marks: Vec::new(),
-        entry_of_line: HashMap::new(),
-        line_sizes: Rc::new(Vec::new()),
+impl SideEditor {
+    fn new(title: SharedString, pretty: String) -> Self {
+        let line_ranges = text_line_ranges(&pretty);
+        Self {
+            title,
+            pretty,
+            line_ranges,
+            marks: Vec::new(),
+            editor: None,
+            gutter: None,
+            active_range: None,
+            options: None,
+        }
     }
+}
+
+/// UTF-8 byte ranges, excluding LF/CRLF terminators. Decorations must use byte
+/// offsets, not character counts; in particular JSON keys may contain Unicode.
+fn text_line_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut offset = 0;
+    text.split_inclusive('\n')
+        .map(|line| {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            let content = if line.ends_with('\n') {
+                content.strip_suffix('\r').unwrap_or(content)
+            } else {
+                content
+            };
+            let range = offset..offset + content.len();
+            offset += line.len();
+            range
+        })
+        .collect()
 }
 
 impl DiffView {
@@ -428,6 +475,7 @@ impl DiffView {
             phase: DiffPhase::Config(Box::new(ConfigPhase { sides })),
             custom_tab_title: None,
             build_generation: 0,
+            ignored_fields: BTreeSet::new(),
             _subs: Vec::new(),
         }
     }
@@ -508,19 +556,75 @@ impl DiffView {
         let DiffPhase::Result(res) = &mut self.phase else {
             return;
         };
-        let Some(entry) = res.entries.get(ix) else {
+        if res.entries.get(ix).is_none() {
             return;
-        };
-        let (a_line, b_line) = (entry.a_line, entry.b_line);
+        }
         res.current = Some(ix);
-        if let Some(line) = a_line {
-            res.scroll_a.scroll_to_item(line, ScrollStrategy::Center);
-        }
-        if let Some(line) = b_line {
-            res.scroll_b.scroll_to_item(line, ScrollStrategy::Center);
-        }
+        res.reveal_current = true;
         res.scroll_entries
             .scroll_to_item(ix, ScrollStrategy::Center);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::*;
+
+    #[test]
+    fn line_decorations_use_utf8_byte_ranges() {
+        let text = "{\n  \"名字\": \"你好\",\n  \"emoji\": \"😀\"\n}";
+        let ranges = text_line_ranges(text);
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0], 0..1);
+        assert_eq!(&text[ranges[1].clone()], "  \"名字\": \"你好\",");
+        assert_eq!(&text[ranges[2].clone()], "  \"emoji\": \"😀\"");
+        assert_eq!(&text[ranges[3].clone()], "}");
+        assert!(
+            ranges
+                .iter()
+                .all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+        );
+    }
+
+    #[test]
+    fn line_ranges_handle_empty_lines_and_crlf() {
+        let text = "a\r\n\r\nb\n";
+        assert_eq!(text_line_ranges(text), vec![0..1, 3..3, 5..6]);
+        assert!(text_line_ranges("").is_empty());
+        assert_eq!(text_line_ranges("null"), vec![0..4]);
+    }
+
+    #[test]
+    fn result_editor_text_matches_semantic_anchors() {
+        let a = Arc::new(JsonTree::parse("{\"名字\":\"旧\",\"gone\":1}").unwrap());
+        let b = Arc::new(JsonTree::parse("{\"名字\":\"新\",\"added\":2}").unwrap());
+        let out = diff_values(&a.root, &b.root);
+        let expected = [out.pretty_a.clone(), out.pretty_b.clone()];
+        let source = |title: &str, parsed: Arc<JsonTree>| SideSource {
+            kind: SourceKind::Manual,
+            title: title.to_string().into(),
+            url: None,
+            text: parsed.pretty.clone(),
+            parsed,
+        };
+        let result = ResultPhase::from_output([source("A", a), source("B", b)], 24.0, out);
+        assert_eq!(result.entries.len(), 3);
+        for (ix, side) in result.sides.iter().enumerate() {
+            assert_eq!(side.pretty, expected[ix]);
+            assert!(side.editor.is_none());
+            for entry in &result.entries {
+                if let Some(line) = if ix == SIDE_A {
+                    entry.a_line
+                } else {
+                    entry.b_line
+                } {
+                    assert!(side.marks.contains(&(line, entry.kind)));
+                    let range = &side.line_ranges[line];
+                    assert!(!side.pretty[range.clone()].is_empty());
+                }
+            }
+        }
+        assert!(!result.reveal_current);
     }
 }

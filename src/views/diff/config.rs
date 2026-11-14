@@ -1,6 +1,127 @@
 use super::*;
 
 impl DiffView {
+    /// The same exemption control is available before and after comparison.
+    pub(super) fn render_exemption_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let summary = if self.ignored_fields.is_empty() {
+            tr!("No field exemptions")
+        } else {
+            self.ignored_fields
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+                .into()
+        };
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .child(
+                Button::new("configure-diff-exemptions")
+                    .label(tr!("Ignore fields…"))
+                    .small()
+                    .tooltip(tr!("Ignore exact field names at every depth"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_exemption_dialog(window, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(summary),
+            )
+            .when(!self.ignored_fields.is_empty(), |this| {
+                this.child(
+                    Button::new("clear-diff-exemptions")
+                        .icon(IconName::X)
+                        .small()
+                        .ghost()
+                        .tooltip(tr!("Clear field exemptions"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_ignored_fields(BTreeSet::new(), cx);
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn open_exemption_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // Include old exemptions even if a source was reloaded without that key,
+        // so they remain visible and can be unchecked instead of silently lost.
+        let mut fields = self.ignored_fields.clone();
+        match &self.phase {
+            DiffPhase::Config(cfg) => {
+                for side in &cfg.sides {
+                    if let Some(parsed) = &side.parsed {
+                        exemptions::collect_field_names(&parsed.root, &mut fields);
+                    }
+                }
+            }
+            DiffPhase::Result(res) => {
+                for side in &res.sources {
+                    exemptions::collect_field_names(&side.parsed.root, &mut fields);
+                }
+            }
+        }
+        let selected = self.ignored_fields.clone();
+        let picker = cx.new(|cx| exemptions::FieldPicker::new(fields, selected, window, cx));
+        let search_focus = picker.read(cx).search_focus(cx);
+        let target = cx.weak_entity();
+        let focused = Cell::new(true);
+        window.open_alert_dialog(cx, move |alert, window, cx| {
+            if focused.replace(false) {
+                search_focus.focus(window, cx);
+            }
+            let read = picker.clone();
+            let target = target.clone();
+            alert
+                .title(tr!("Field exemptions"))
+                .description(tr!("Select field names to ignore at every depth, including objects in arrays. Matching is exact and case-sensitive; search only filters this list. Original JSON stays visible."))
+                .ok_text(tr!("Apply exemptions"))
+                .confirm()
+                .child(picker.clone())
+                .on_ok(move |_, _, cx| {
+                    let ignored = read.read(cx).selected().clone();
+                    let _ = target.update(cx, |this, cx| this.set_ignored_fields(ignored, cx));
+                    true
+                })
+        });
+    }
+
+    fn set_ignored_fields(&mut self, ignored: BTreeSet<String>, cx: &mut Context<Self>) {
+        if self.ignored_fields == ignored {
+            return;
+        }
+        self.ignored_fields = ignored;
+        let sources = match &self.phase {
+            DiffPhase::Result(res) => Some(res.sources.clone()),
+            // Invalidate an in-flight comparison started from the config page,
+            // too; it must not finish with the old exemptions.
+            DiffPhase::Config(cfg)
+                if cfg.sides.iter().any(|s| s.busy)
+                    && cfg.sides.iter().all(|s| s.parsed.is_some()) =>
+            {
+                Some([cfg.sides[0].snapshot(), cfg.sides[1].snapshot()])
+            }
+            _ => None,
+        };
+        if let Some(sources) = sources {
+            let line_h = crate::views::settings::settings(cx).row_height();
+            self.start_diff(sources, line_h, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     // ---------- config phase ----------
 
     /// What one side's load menu can offer: its own URL (for re-fetch) plus
@@ -69,6 +190,7 @@ impl DiffView {
         let notes = self.render_notes(cx);
         let card_a = self.render_side_card(SIDE_A, cx);
         let card_b = self.render_side_card(SIDE_B, cx);
+        let exemptions = self.render_exemption_controls(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
 
@@ -92,6 +214,7 @@ impl DiffView {
                     .child(card_b),
             )
             .children(notes)
+            .child(exemptions)
             .child(
                 h_flex()
                     .w_full()

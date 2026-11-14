@@ -18,7 +18,10 @@ use crate::tr;
 use json_patch::PatchOperation;
 use json_patch::jsonptr::Pointer;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{
+    borrow::Cow,
+    collections::{BTreeSet, HashMap},
+};
 
 use crate::json_model::pretty::{self, key_seg};
 
@@ -137,10 +140,51 @@ fn diff(a_text: &str, b_text: &str) -> DiffOutput {
     diff_values(&a, &b)
 }
 
-/// Compare two values that the caller already parsed.
+/// Compare two values without field exemptions.
+#[cfg(test)]
 pub(super) fn diff_values(a: &Value, b: &Value) -> DiffOutput {
+    diff_values_with_ignored(a, b, &BTreeSet::new())
+}
+
+/// Remove matching object properties at every depth, including inside arrays.
+/// Keep non-exempt container structure and array indices intact. Only these
+/// comparison copies are changed; display text and anchors use the originals.
+fn without_ignored_fields(value: &Value, ignored: &BTreeSet<String>) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !ignored.contains(*key))
+                .map(|(key, value)| (key.clone(), without_ignored_fields(value, ignored)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|value| without_ignored_fields(value, ignored))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+pub(super) fn diff_values_with_ignored(
+    a: &Value,
+    b: &Value,
+    ignored: &BTreeSet<String>,
+) -> DiffOutput {
     let side_a = pretty::document(a);
     let side_b = pretty::document(b);
+    let a = if ignored.is_empty() {
+        Cow::Borrowed(a)
+    } else {
+        Cow::Owned(without_ignored_fields(a, ignored))
+    };
+    let b = if ignored.is_empty() {
+        Cow::Borrowed(b)
+    } else {
+        Cow::Owned(without_ignored_fields(b, ignored))
+    };
+    let (a, b) = (a.as_ref(), b.as_ref());
 
     let mut entries: Vec<DiffEntry> = Vec::new();
     let mut record = |kind: DiffKind, path: String, old: Option<&Value>, new: Option<&Value>| {
@@ -208,6 +252,110 @@ pub(super) fn diff_values(a: &Value, b: &Value) -> DiffOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diff_ignored(a: Value, b: Value, names: &[&str]) -> DiffOutput {
+        let ignored = names.iter().map(|name| name.to_string()).collect();
+        diff_values_with_ignored(&a, &b, &ignored)
+    }
+
+    #[test]
+    fn exemptions_match_fields_at_all_depths() {
+        let a = serde_json::json!({"root":{"key1":1,"key2":{"key1":{"child":1},"keep":1}}});
+        let b = serde_json::json!({"root":{"key1":999,"key2":{"key1":false,"keep":2}}});
+        let out = diff_ignored(a.clone(), b.clone(), &["key1"]);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$.root.key2.keep");
+        assert_eq!(out.pretty_a, pretty::document(&a).text);
+        assert_eq!(out.pretty_b, pretty::document(&b).text);
+        for (text, line) in [
+            (&out.pretty_a, out.entries[0].a_line),
+            (&out.pretty_b, out.entries[0].b_line),
+        ] {
+            assert!(
+                text.lines()
+                    .nth(line.unwrap())
+                    .unwrap()
+                    .contains("\"keep\"")
+            );
+        }
+    }
+
+    #[test]
+    fn exemptions_ignore_add_remove_and_entire_subtree() {
+        let out = diff_ignored(
+            serde_json::json!({"key1":{"changed":[1,2]},"nested":{"key1":1}}),
+            serde_json::json!({"nested":{},"other":{"key1":123}}),
+            &["key1"],
+        );
+        // A non-exempt parent is still structural information even if empty.
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$.other");
+        assert_eq!(out.entries[0].new, "{}");
+        let out = diff_ignored(
+            serde_json::json!({"key1":1}),
+            serde_json::json!({}),
+            &["key1"],
+        );
+        assert!(out.entries.is_empty());
+    }
+
+    #[test]
+    fn exemptions_recurse_into_arrays_without_changing_indices() {
+        let out = diff_ignored(
+            serde_json::json!({"list":[{"key1":1,"keep":0},{"key1":2,"keep":1}]}),
+            serde_json::json!({"list":[{"key1":9,"keep":0},{"keep":2}]}),
+            &["key1"],
+        );
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$.list[1].keep");
+        let out = diff_ignored(
+            serde_json::json!([{"key1":1},{"key1":2}]),
+            serde_json::json!([{"key1":3}]),
+            &["key1"],
+        );
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$[1]");
+        assert_eq!(out.entries[0].kind, DiffKind::Removed);
+    }
+
+    #[test]
+    fn exemptions_are_exact_case_sensitive_and_not_paths_or_values() {
+        let out = diff_ignored(
+            serde_json::json!({"key1":1,"Key1":1,"key10":1,"literal":"key1","0":1,"items":[1]}),
+            serde_json::json!({"key1":2,"Key1":2,"key10":2,"literal":"other","0":2,"items":[2]}),
+            &["key1", "0", "$.Key1"],
+        );
+        assert_eq!(out.entries.len(), 4);
+        assert!(out.entries.iter().any(|e| e.path == "$.Key1"));
+        assert!(out.entries.iter().any(|e| e.path == "$.key10"));
+        assert!(out.entries.iter().any(|e| e.path == "$.literal"));
+        assert!(out.entries.iter().any(|e| e.path == "$.items[0]"));
+    }
+
+    #[test]
+    fn exemptions_support_unicode_escaped_and_multiple_names() {
+        let a = serde_json::json!({"名字":1,"nested":{"a/b":1,"a~b":1,"key1":1,"keep":1}});
+        let b = serde_json::json!({"名字":2,"nested":{"a/b":2,"a~b":2,"key1":2,"keep":1}});
+        assert!(
+            diff_ignored(a.clone(), b.clone(), &["名字", "a/b", "a~b", "key1"])
+                .entries
+                .is_empty()
+        );
+        assert_eq!(diff_ignored(a, b, &[]).entries.len(), 4);
+    }
+
+    #[test]
+    fn ancestor_changes_never_include_exempt_values_in_details() {
+        let out = diff_ignored(
+            serde_json::json!({"root":{"key1":"hidden","keep":1}}),
+            serde_json::json!({"root":[]}),
+            &["key1"],
+        );
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].kind, DiffKind::TypeChanged);
+        assert_eq!(out.entries[0].old, "{\"keep\":1}");
+        assert!(out.pretty_a.contains("hidden"));
+    }
 
     fn kind_of(path: &str, entries: &[DiffEntry]) -> Option<DiffKind> {
         entries.iter().find(|e| e.path == path).map(|e| e.kind)

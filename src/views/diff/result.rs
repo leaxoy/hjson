@@ -9,6 +9,7 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) -> impl gpui_kit::IntoElement {
         let bg = cx.theme().background;
+        self.prepare_side_editors(window, cx);
         let has_diff = matches!(&self.phase, DiffPhase::Result(res) if !res.entries.is_empty());
 
         // Neither side gets an initial size: with both on the group's flex
@@ -55,10 +56,12 @@ impl DiffView {
             cols.into_any_element()
         };
 
+        let exemptions = self.render_exemption_controls(cx);
         v_flex()
             .size_full()
             .overflow_hidden()
             .bg(bg)
+            .child(exemptions)
             .child(div().flex_1().min_h_0().overflow_hidden().child(body))
             .child(status)
     }
@@ -257,40 +260,155 @@ impl DiffView {
             .collect()
     }
 
+    /// Initialize once per result, not once per render. Keeping each state
+    /// alive preserves its selection, folds and viewport across theme/size changes.
+    fn prepare_side_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (wrap, line_numbers, line_h) = {
+            let settings = crate::views::settings::settings(cx);
+            (
+                settings.wrap_raw_lines,
+                settings.line_numbers,
+                settings.row_height(),
+            )
+        };
+        let colors = {
+            let theme = cx.theme();
+            [theme.success, theme.danger, theme.warning, theme.primary]
+        };
+        let color_of = |kind| match kind {
+            DiffKind::Added => colors[0],
+            DiffKind::Removed => colors[1],
+            DiffKind::Modified => colors[2],
+            DiffKind::TypeChanged => colors[3],
+        };
+        let res = match &mut self.phase {
+            DiffPhase::Result(res) => res,
+            _ => return,
+        };
+        res.line_h = line_h;
+        let refresh_decorations = res.decoration_state != Some((colors, res.current));
+        let entry = res.current.and_then(|ix| res.entries.get(ix)).cloned();
+        for side in &mut res.sides {
+            if side.editor.is_none() {
+                let editor = cx.new(|cx| {
+                    EditorState::new(window, cx)
+                        .default_value(side.pretty.clone())
+                        .language("json")
+                        .line_number(line_numbers)
+                        .soft_wrap(wrap)
+                        .scroll_beyond_last_line(Some(0))
+                        .scroll_bounce(false)
+                });
+                let (gutter, active_range) = editor.update(cx, |state, cx| {
+                    state.set_readonly(true, cx);
+                    (
+                        state.create_gutter_decorations_collection(Vec::new(), cx),
+                        state.create_range_decorations_collection(Vec::new(), cx),
+                    )
+                });
+                side.editor = Some(editor);
+                side.gutter = Some(gutter);
+                side.active_range = Some(active_range);
+                side.options = Some((wrap, line_numbers));
+            }
+        }
+        // set_cursor_position focuses its editor. Restore whichever control
+        // initiated navigation so stepping a diff never steals focus to side B.
+        let restore_focus = res.reveal_current.then(|| window.focused(cx)).flatten();
+        for (ix, side) in res.sides.iter_mut().enumerate() {
+            let editor = side.editor.as_ref().expect("initialized above");
+            if side.options != Some((wrap, line_numbers)) {
+                editor.update(cx, |state, cx| {
+                    state.set_soft_wrap(wrap, window, cx);
+                    state.set_line_number(line_numbers, window, cx);
+                });
+                side.options = Some((wrap, line_numbers));
+            }
+            let line = entry.as_ref().and_then(|entry| {
+                if ix == SIDE_A {
+                    entry.a_line
+                } else {
+                    entry.b_line
+                }
+            });
+            if refresh_decorations {
+                let marks = side
+                    .marks
+                    .iter()
+                    .filter_map(|(line, kind)| {
+                        side.line_ranges.get(*line).map(|range| {
+                            GutterDecoration::new(range.clone()).with_color(color_of(*kind))
+                        })
+                    })
+                    .collect();
+                side.gutter
+                    .as_ref()
+                    .expect("initialized above")
+                    .set(marks, cx);
+                let active = line
+                    .and_then(|line| side.line_ranges.get(line))
+                    .map(|range| {
+                        RangeDecoration::new(range.clone())
+                            .with_style(RangeDecorationStyle::Fill)
+                            .with_color(
+                                color_of(entry.as_ref().expect("line comes from entry").kind)
+                                    .opacity(0.16),
+                            )
+                    })
+                    .into_iter()
+                    .collect();
+                side.active_range
+                    .as_ref()
+                    .expect("initialized above")
+                    .set(active, cx);
+            }
+            if res.reveal_current
+                && let Some(line) = line
+            {
+                let position = Position::new(line.min(u32::MAX as usize) as u32, 0);
+                editor.update(cx, |state, cx| {
+                    state.unfold_at(position, cx);
+                    state.set_cursor_position(position, window, cx);
+                });
+            }
+        }
+        if let Some(focus) = restore_focus {
+            focus.focus(window, cx);
+        } else if res.reveal_current {
+            window.blur(cx);
+        }
+        res.decoration_state = Some((colors, res.current));
+        res.reveal_current = false;
+    }
+
     fn render_side_panel(&mut self, side: SideIx, cx: &mut Context<Self>) -> AnyElement {
-        let view = cx.entity();
         let (bg, muted) = {
             let theme = cx.theme();
             (theme.background, theme.muted_foreground)
         };
-        let wanted_h = crate::views::settings::settings(cx).row_height();
-        if let DiffPhase::Result(res) = &mut self.phase
-            && res.line_h != wanted_h
-        {
-            res.line_h = wanted_h;
-            let line_h = res.line_h;
-            for side_lines in res.sides.iter_mut() {
-                side_lines.line_sizes =
-                    Rc::new(vec![size(px(640.), px(line_h)); side_lines.lines.len()]);
-            }
-        }
-        let (sizes, scroll, lines_empty, title) = {
-            let res = self.result_ref();
-            let s = &res.sides[side];
-            let scroll = if side == SIDE_A {
-                &res.scroll_a
+        let mono = crate::views::settings::settings(cx).mono_family(cx);
+        let res = self.result_ref();
+        let s = &res.sides[side];
+        let editor = s
+            .editor
+            .as_ref()
+            .expect("prepared before rendering")
+            .clone();
+        let title = s.title.clone();
+        let font_size = (res.line_h - 8.0).max(1.0);
+        let body = Editor::new(&editor)
+            .readonly(true)
+            .appearance(false)
+            .bordered(false)
+            .size_full()
+            .font_family(mono)
+            .text_size(px(font_size))
+            .line_height(px(res.line_h))
+            .aria_label(if side == SIDE_A {
+                tr!("Side A")
             } else {
-                &res.scroll_b
-            };
-            (
-                s.line_sizes.clone(),
-                scroll,
-                s.lines.is_empty(),
-                s.title.clone(),
-            )
-        };
-        // This side's reload entry sits above its own column, next to the
-        // source title it belongs to.
+                tr!("Side B")
+            });
         let load = self.side_load_button(side, cx);
         let header = chrome::panel_header(
             if side == SIDE_A { "A" } else { "B" },
@@ -313,111 +431,19 @@ impl DiffView {
             .child(header)
             .child(
                 v_flex()
-                    .id(SharedString::from(format!("diff-scroll-{side}")))
+                    .id(SharedString::from(format!("diff-editor-{side}")))
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .size_full()
                     .py_1()
-                    .child(
-                        v_virtual_list(
-                            view,
-                            SharedString::from(format!("diff-rows-{side}")),
-                            sizes,
-                            move |this, range, window, cx| {
-                                this.render_side_rows(side, range, window, cx)
-                            },
-                        )
-                        .track_scroll(scroll),
-                    )
-                    .vertical_scrollbar(scroll),
+                    // The editor binds cmd/ctrl-[ and ] to indentation. In a
+                    // readonly diff these retain the page's change navigation.
+                    .capture_action(cx.listener(|this, _: &Indent, _, cx| this.jump(1, cx)))
+                    .capture_action(cx.listener(|this, _: &Outdent, _, cx| this.jump(-1, cx)))
+                    .child(body),
             )
-            .when(lines_empty, |this| {
-                this.child(chrome::empty_state(
-                    IconName::FileText,
-                    tr!("Empty document"),
-                    None,
-                ))
-            })
             .into_any_element()
-    }
-
-    fn render_side_rows(
-        &mut self,
-        side: SideIx,
-        range: Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        // Batch together everything the row builder needs before the loop: the
-        // theme borrows cx and the loop wants plain data.
-        let row_h = {
-            let res = self.result_ref();
-            res.line_h
-        };
-        let settings = crate::views::settings::settings(cx);
-        // Line numbers are a document-wide setting, so the diff obeys it too.
-        let show_gutter = settings.line_numbers;
-        let (border_default, success, danger, warning, primary) = {
-            let theme = cx.theme();
-            (
-                theme.border,
-                theme.success,
-                theme.danger,
-                theme.warning,
-                theme.primary,
-            )
-        };
-        let color_of = |kind: DiffKind| -> Hsla {
-            match kind {
-                DiffKind::Added => success,
-                DiffKind::Removed => danger,
-                DiffKind::Modified => warning,
-                DiffKind::TypeChanged => primary,
-            }
-        };
-
-        let (lines, marks, entry_of_line, current) = {
-            let res = self.result_ref();
-            let s = &res.sides[side];
-            (s.lines.clone(), &s.marks, &s.entry_of_line, res.current)
-        };
-
-        range
-            .map(|ix| {
-                let mark = marks.get(ix).copied().flatten();
-                let entry_ix = entry_of_line.get(&ix).copied();
-                let is_current = entry_ix.is_some() && entry_ix == current;
-
-                let marker = mark.map(|kind| JsonTextMarker {
-                    glyph: kind.glyph().to_string().into(),
-                    color: color_of(kind),
-                });
-                let on_click: Option<JsonTextClickHandler> = entry_ix.map(|entry| {
-                    Box::new(cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
-                        this.select_entry(entry, cx);
-                    })) as JsonTextClickHandler
-                });
-                let row = JsonTextView::new(JsonTextViewProps {
-                    id: Some(SharedString::from(format!("diff-line-{side}-{ix}"))),
-                    ix,
-                    lines: lines.clone(),
-                    line_h: row_h,
-                    mode: JsonTextMode::Clipped,
-                    gutter: if show_gutter {
-                        JsonTextGutter::Fixed(px(56.))
-                    } else {
-                        JsonTextGutter::Hidden
-                    },
-                    marker_column: true,
-                    active: is_current,
-                    marker,
-                    border_color: Some(mark.map(color_of).unwrap_or(border_default)),
-                    on_click,
-                })
-                .render(window, cx);
-                row.into_any_element()
-            })
-            .collect()
     }
 
     fn render_status(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -502,7 +528,9 @@ impl DiffView {
             None => div()
                 .text_xs()
                 .text_color(muted)
-                .child(if counts.is_empty() {
+                .child(if counts.is_empty() && !self.ignored_fields.is_empty() {
+                    tr!("No differences after field exemptions")
+                } else if counts.is_empty() {
                     tr!("✓ The two documents are identical")
                 } else {
                     tr!("Pick a row in the change list below, or step through with ◀ ▶")
