@@ -112,6 +112,7 @@ pub struct DiffView {
     phase: DiffPhase,
     custom_tab_title: Option<SharedString>,
     build_generation: u64,
+    string_expansion: Option<bool>,
     /// Exact field names, scoped to this comparison tab; never JSONPath rules.
     ignored_fields: BTreeSet<String>,
     _subs: Vec<Subscription>,
@@ -303,6 +304,29 @@ impl ResultPhase {
 }
 
 impl DiffView {
+    pub(crate) fn refresh_string_expansion(&mut self, cx: &mut Context<Self>) {
+        let expand = crate::views::settings::settings(cx).expand_json_strings;
+        if self.string_expansion == Some(expand) {
+            return;
+        }
+        self.string_expansion = Some(expand);
+        match &mut self.phase {
+            DiffPhase::Config(cfg) => {
+                for side in &mut cfg.sides {
+                    if let Some(parsed) = &side.parsed {
+                        side.parsed = Some(parsed.with_string_expansion(expand));
+                    }
+                }
+            }
+            DiffPhase::Result(res) => {
+                let sources = res.sources.clone();
+                let line_h = res.line_h;
+                self.start_diff(sources, line_h, cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// Re-run the diff after one side's source was (re)loaded from the
     /// result-phase toolbar. Keeps the untouched side's raw text.
     fn reload_side(&mut self, side: SideIx, source: SideSource, cx: &mut Context<Self>) {
@@ -329,6 +353,8 @@ impl DiffView {
     }
 
     fn start_diff(&mut self, sources: [SideSource; 2], line_h: f32, cx: &mut Context<Self>) {
+        let expand = crate::views::settings::settings(cx).expand_json_strings;
+        self.string_expansion = Some(expand);
         self.build_generation += 1;
         let generation = self.build_generation;
         if let DiffPhase::Config(cfg) = &mut self.phase {
@@ -341,6 +367,10 @@ impl DiffView {
 
         let ignored = self.ignored_fields.clone();
         let task = cx.background_spawn(async move {
+            let sources = sources.map(|mut source| {
+                source.parsed = source.parsed.with_string_expansion(expand);
+                source
+            });
             let output = diff_values_with_ignored(
                 &sources[SIDE_A].parsed.root,
                 &sources[SIDE_B].parsed.root,
@@ -352,6 +382,10 @@ impl DiffView {
             let (sources, output) = task.await;
             let _ = this.update(cx, |this, cx| {
                 if generation != this.build_generation {
+                    return;
+                }
+                if crate::views::settings::settings(cx).expand_json_strings != expand {
+                    this.start_diff(sources, line_h, cx);
                     return;
                 }
                 let mut next = ResultPhase::from_output(sources, line_h, output);
@@ -379,6 +413,9 @@ impl DiffView {
     /// Put a raw source into one side, whichever phase the page is in: the
     /// config page fills its slot, the result page re-runs the comparison.
     fn fill_source(&mut self, side: SideIx, source: SideSource, cx: &mut Context<Self>) {
+        let expand = crate::views::settings::settings(cx).expand_json_strings;
+        let mut source = source;
+        source.parsed = source.parsed.with_string_expansion(expand);
         if matches!(self.phase, DiffPhase::Config(_)) {
             self.with_config(|cfg| cfg.sides[side].fill(source.into()));
             cx.notify();
@@ -475,6 +512,7 @@ impl DiffView {
             phase: DiffPhase::Config(Box::new(ConfigPhase { sides })),
             custom_tab_title: None,
             build_generation: 0,
+            string_expansion: None,
             ignored_fields: BTreeSet::new(),
             _subs: Vec::new(),
         }
@@ -494,6 +532,7 @@ impl DiffView {
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_string_expansion(cx);
         match &self.phase {
             DiffPhase::Config(_) => self.render_config(cx).into_any_element(),
             DiffPhase::Result(_) => self.render_result(window, cx).into_any_element(),

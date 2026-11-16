@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 pub(crate) mod hints;
 pub(crate) mod pretty;
+mod strings;
 
 /// The JSON type of a value, used for picking colors and icons in the tree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,12 +52,65 @@ pub struct JsonTree {
     pub nodes: Vec<FlatNode>,
     /// Pretty-printed root JSON, kept for the raw panel.
     pub pretty: String,
+    /// Successful embedded-string decodes; the original import stays in LoadedDocument.
+    pub decoded_strings: usize,
+    /// Preserve the literal input so toggling expansion can restore strings.
+    pub(crate) source_text: String,
+    pub(crate) expand_json_strings: bool,
 }
 
 impl JsonTree {
-    /// Parse a text and build the tree arena. Object key order is preserved.
+    /// Parse and best-effort decode JSON contained in strings at every depth.
+    /// Invalid embedded JSON remains a string; object keys are never decoded.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        let root = serde_json::from_str::<Value>(text)?;
+        Self::parse_with_options(text, true)
+    }
+
+    pub(crate) fn parse_with_options(
+        text: &str,
+        expand_json_strings: bool,
+    ) -> Result<Self, serde_json::Error> {
+        let mut root = serde_json::from_str::<Value>(text)?;
+        let decoded_strings = if expand_json_strings {
+            strings::decode(&mut root, text.len())
+        } else {
+            0
+        };
+        Ok(Self::from_value(
+            root,
+            decoded_strings,
+            text.to_string(),
+            expand_json_strings,
+        ))
+    }
+
+    pub(crate) fn with_string_expansion(
+        self: &std::sync::Arc<Self>,
+        enabled: bool,
+    ) -> std::sync::Arc<Self> {
+        if self.expand_json_strings == enabled {
+            return self.clone();
+        }
+        // source_text was validated when this tree was created. Never derive
+        // it from pretty, which has already lost decoded string boundaries.
+        std::sync::Arc::new(
+            Self::parse_with_options(&self.source_text, enabled)
+                .expect("a parsed tree always retains valid source JSON"),
+        )
+    }
+
+    /// Keep an actively edited buffer literal so tree anchors refer to the
+    /// actual text under the cursor. Decode it when returning to viewing mode.
+    pub(crate) fn parse_literal(text: &str) -> Result<Self, serde_json::Error> {
+        Self::parse_with_options(text, false)
+    }
+
+    fn from_value(
+        root: Value,
+        decoded_strings: usize,
+        source_text: String,
+        expand_json_strings: bool,
+    ) -> Self {
         let nodes = vec![FlatNode {
             parent: None,
             children: Vec::new(),
@@ -77,11 +131,14 @@ impl JsonTree {
             let path = json_path_for(&nodes, id);
             nodes[id].line = doc.anchors.get(&path).copied();
         }
-        Ok(Self {
+        Self {
             root,
             nodes,
             pretty: doc.text,
-        })
+            decoded_strings,
+            source_text,
+            expand_json_strings,
+        }
     }
 
     /// Visible node ids (flattened, preorder) given the expanded set.

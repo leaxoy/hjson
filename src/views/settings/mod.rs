@@ -286,6 +286,13 @@ impl SettingsHub {
                         Settings::default().wrap_raw_lines,
                     ))
                     .item(Self::switch(
+                        t!("settings.expand_json_strings"),
+                        t!("settings.expand_json_strings_desc"),
+                        |cx| settings(cx).expand_json_strings,
+                        |value, cx| update_settings(cx, |s| s.expand_json_strings = value),
+                        Settings::default().expand_json_strings,
+                    ))
+                    .item(Self::switch(
                         t!("settings.sort_object_keys"),
                         t!("settings.sort_object_keys_desc"),
                         |cx| settings(cx).sort_object_keys,

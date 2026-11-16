@@ -128,6 +128,21 @@ mod tests {
     }
 
     #[test]
+    fn string_expansion_persists_and_old_configs_keep_default() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.expand_json_strings);
+        for enabled in [false, true] {
+            let settings = Settings {
+                expand_json_strings: enabled,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["expand_json_strings"], enabled);
+            assert_eq!(serde_json::from_value::<Settings>(json).unwrap(), settings);
+        }
+    }
+
+    #[test]
     fn writes_stable_keys() {
         let defaults = serde_json::to_value(Settings::default()).unwrap();
         assert!(defaults["font_family"].is_null());

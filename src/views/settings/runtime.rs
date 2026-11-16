@@ -23,6 +23,7 @@ pub(crate) fn settings(cx: &App) -> &Settings {
 pub(crate) fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     let old_line_numbers = settings(cx).line_numbers;
     let old_sort_object_keys = settings(cx).sort_object_keys;
+    let old_expand_json_strings = settings(cx).expand_json_strings;
     let old_appearance = settings(cx).appearance;
     let old_language = settings(cx).language;
     f(cx.global_mut::<Settings>());
@@ -44,6 +45,9 @@ pub(crate) fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     }
     if settings(cx).sort_object_keys != old_sort_object_keys {
         crate::app::refresh_doc_view_key_sort(cx);
+    }
+    if settings(cx).expand_json_strings != old_expand_json_strings {
+        crate::app::refresh_json_string_expansion(cx);
     }
     cx.refresh_windows();
     persist(cx);

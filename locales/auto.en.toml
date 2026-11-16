@@ -32,6 +32,7 @@
 "History" = "History"
 "Raw" = "Raw"
 "Raw JSON" = "Raw JSON"
+"%{count} JSON strings decoded" = "%{count} JSON strings decoded"
 "Enable raw editing" = "Enable raw editing"
 "Disable raw editing" = "Disable raw editing"
 "Raw collapse all requires a public editor folding API" = "Raw collapse all requires a public editor folding API"

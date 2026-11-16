@@ -253,6 +253,69 @@ pub(super) fn diff_values_with_ignored(
 mod tests {
     use super::*;
 
+    #[test]
+    fn global_string_policy_changes_diff_semantics_reversibly() {
+        use crate::json_model::JsonTree;
+        use std::sync::Arc;
+        let a = Arc::new(JsonTree::parse_literal(r#"{"payload":"{\"a\":1,\"b\":2}"}"#).unwrap());
+        let b = Arc::new(JsonTree::parse_literal(r#"{"payload":{"b":2,"a":1}}"#).unwrap());
+        for enabled in [false, true, false, true] {
+            let a = a.with_string_expansion(enabled);
+            let b = b.with_string_expansion(enabled);
+            let out = diff_values(&a.root, &b.root);
+            assert_eq!(out.entries.is_empty(), enabled);
+            assert_eq!(out.pretty_a, a.pretty);
+            assert_eq!(out.pretty_b, b.pretty);
+            if !enabled {
+                assert_eq!(out.entries[0].kind, DiffKind::TypeChanged);
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_strings_compare_structurally_with_original_view_anchors() {
+        use crate::json_model::JsonTree;
+        let a = JsonTree::parse(r#"{"payload":"{\"a\":1,\"b\":2}"}"#).unwrap();
+        let b = JsonTree::parse(r#"{"payload":{"b":2,"a":1}}"#).unwrap();
+        let out = diff_values(&a.root, &b.root);
+        assert!(out.entries.is_empty());
+        assert_eq!(out.pretty_a, a.pretty);
+        assert_eq!(out.pretty_b, b.pretty);
+        let b = JsonTree::parse(r#"{"payload":"{\"a\":9,\"b\":2}"}"#).unwrap();
+        let out = diff_values(&a.root, &b.root);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$.payload.a");
+        assert_eq!(out.entries[0].old, "1");
+        for (text, line) in [
+            (&out.pretty_a, out.entries[0].a_line),
+            (&out.pretty_b, out.entries[0].b_line),
+        ] {
+            assert!(text.lines().nth(line.unwrap()).unwrap().contains("\"a\""));
+        }
+        let ignored = BTreeSet::from(["a".to_string()]);
+        assert!(
+            diff_values_with_ignored(&a.root, &b.root, &ignored)
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn root_string_and_arrays_inside_strings_use_structural_diff() {
+        use crate::json_model::JsonTree;
+        let a = JsonTree::parse(&serde_json::to_string(&r#"{"items":"[1,2]"}"#).unwrap()).unwrap();
+        let b = JsonTree::parse(r#"{"items":[1,3]}"#).unwrap();
+        let out = diff_values(&a.root, &b.root);
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].path, "$.items[1]");
+        let invalid = JsonTree::parse(r#"{"payload":"{broken"}"#).unwrap();
+        let object = JsonTree::parse(r#"{"payload":{"a":1}}"#).unwrap();
+        assert_eq!(
+            diff_values(&invalid.root, &object.root).entries[0].kind,
+            DiffKind::TypeChanged
+        );
+    }
+
     fn diff_ignored(a: Value, b: Value, names: &[&str]) -> DiffOutput {
         let ignored = names.iter().map(|name| name.to_string()).collect();
         diff_values_with_ignored(&a, &b, &ignored)

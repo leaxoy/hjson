@@ -46,6 +46,11 @@ fn epoch_parts_from_number(number: &serde_json::Number) -> Option<(i64, u32)> {
     if !value.is_finite() {
         return None;
     }
+    // The shortest decimal representation avoids binary-float drift at the
+    // millisecond boundary (e.g. 1700000000.123 -> .122 when truncating nanos).
+    if let Some(parts) = epoch_parts_from_decimal_str(&number.to_string()) {
+        return Some(parts);
+    }
     epoch_parts_from_f64(value)
 }
 

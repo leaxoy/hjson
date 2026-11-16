@@ -410,18 +410,26 @@ impl DiffView {
                 tr!("Side B")
             });
         let load = self.side_load_button(side, cx);
+        let decoded = self.result_ref().sources[side].parsed.decoded_strings;
+        let mut stats = vec![
+            div()
+                .text_xs()
+                .text_color(muted)
+                .max_w(px(240.))
+                .min_w_0()
+                .truncate()
+                .child(title)
+                .into_any_element(),
+        ];
+        if decoded > 0 {
+            stats.push(chrome::stat(
+                tr!("%{count} JSON strings decoded", count = decoded.to_string()),
+                cx,
+            ));
+        }
         let header = chrome::panel_header(
             if side == SIDE_A { "A" } else { "B" },
-            vec![
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .max_w(px(240.))
-                    .min_w_0()
-                    .truncate()
-                    .child(title)
-                    .into_any_element(),
-            ],
+            stats,
             vec![load],
             cx,
         );

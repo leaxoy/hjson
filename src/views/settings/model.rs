@@ -50,6 +50,7 @@ pub(crate) struct Settings {
     pub(crate) line_numbers: bool,
     pub(crate) wrap_raw_lines: bool,
     pub(crate) sort_object_keys: bool,
+    pub(crate) expand_json_strings: bool,
 
     #[serde(deserialize_with = "codec::syntax_dark")]
     pub(crate) syntax_dark: SharedString,
@@ -70,6 +71,7 @@ impl Default for Settings {
             line_numbers: true,
             wrap_raw_lines: false,
             sort_object_keys: true,
+            expand_json_strings: true,
 
             syntax_dark: SharedString::from("Tokyo Night"),
             syntax_light: SharedString::from("GitHub"),

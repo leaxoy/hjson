@@ -29,13 +29,23 @@ impl DocView {
         } else {
             tr!("Enable raw editing")
         };
+        let mut stats = vec![
+            chrome::stat(tr!("%{count} lines", count = line_count.to_string()), cx),
+            crate::app::human_size(byte_size, cx),
+        ];
+        if self.doc.decoded_strings > 0 {
+            stats.push(chrome::stat(
+                tr!(
+                    "%{count} JSON strings decoded",
+                    count = self.doc.decoded_strings.to_string()
+                ),
+                cx,
+            ));
+        }
         let header = chrome::panel_toolbar(
             "doc-raw-toolbar",
             tr!("Raw"),
-            vec![
-                chrome::stat(tr!("%{count} lines", count = line_count.to_string()), cx),
-                crate::app::human_size(byte_size, cx),
-            ],
+            stats,
             vec![
                 source_menu::header_load_button(
                     "reload-doc",

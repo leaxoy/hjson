@@ -11,12 +11,12 @@ pub mod menu;
 mod render;
 mod tabs;
 
-pub(crate) use actions::refresh_doc_view_key_sort;
 pub use actions::{
     CloseTab, CollapseAll, DiffNext, DiffPrev, DiffTab, ExpandAll, FetchUrl, FindInDoc,
     ManualInput, NewTab, OpenFile, OpenSample, PasteJson, SelectNextTab, SelectPrevTab,
     ToggleHistory, init,
 };
+pub(crate) use actions::{refresh_doc_view_key_sort, refresh_json_string_expansion};
 pub use documents::DocEntry;
 pub use history::human_size;
 pub use home::HomeView;

@@ -14,6 +14,13 @@ All parsing, formatting, comparison, and history state stay local to the app.
 - Open JSON from clipboard, files, URLs, manual input, sample data, or prior
   session imports.
 - View a document as formatted text, a structural tree, or both side by side.
+- Use the global **Settings → JSON Preview → Recursively expand JSON strings**
+  switch (enabled by default) to decode valid JSON inside root or nested strings
+  for doc and structural diff. Disable it to preserve literal string types;
+  changes apply to open views and persist across restarts. Malformed strings stay
+  unchanged. This includes JSON scalars such as `"123"`, `"true"`, and `"null"`.
+  Original imports stay in history. Live editing remains literal until locked;
+  copy/export uses displayed text. Extra decoding has depth, layer and work limits.
 - Switch the document view between split, text-only, and tree-only modes from
   the pane toolbar.
 - Filter the tree by keys or values, expand/collapse nodes, and keep tree

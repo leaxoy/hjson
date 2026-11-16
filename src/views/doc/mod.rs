@@ -179,6 +179,7 @@ impl DocView {
         let raw_wrap = settings.wrap_raw_lines;
         let line_numbers = settings.line_numbers;
         let sort_keys = settings.sort_object_keys;
+        let doc = doc.with_string_expansion(settings.expand_json_strings);
         let raw_text = doc.pretty.clone();
         let raw_editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -211,7 +212,14 @@ impl DocView {
         let raw_sub = cx.subscribe_in(&raw_editor, window, |this, state, event, _window, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = state.read(cx).value().to_string();
-                this.schedule_raw_sync(text, cx);
+                if text != this.doc.pretty {
+                    this.schedule_raw_sync(text, cx);
+                } else {
+                    // Undoing back to the last tree must invalidate an older
+                    // pending parse as well as avoid parsing our own set_value.
+                    this.raw_sync_generation = this.raw_sync_generation.wrapping_add(1);
+                    this.raw_sync_task = None;
+                }
             }
         });
 
@@ -266,7 +274,9 @@ impl DocView {
     }
 
     fn apply_raw_sync(&mut self, text: String, cx: &mut Context<Self>) {
-        match JsonTree::parse(&text) {
+        // Don't rewrite the user's buffer while typing. Viewing mode decodes
+        // on load and when editing is locked again.
+        match JsonTree::parse_literal(&text) {
             Ok(next) => self.replace_tree_document(Arc::new(next), cx),
             Err(err) => {
                 self.toast = Some(Status::Error(AppError::parse(err)));
@@ -375,6 +385,25 @@ impl DocView {
             );
         }
         self.rebuild_tree_rows(cx);
+    }
+
+    pub(crate) fn refresh_string_expansion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.raw_editable {
+            return;
+        }
+        let expand = crate::views::settings::settings(cx).expand_json_strings;
+        if self.doc.expand_json_strings == expand {
+            return;
+        }
+        let next = self.doc.with_string_expansion(expand);
+        let text = next.pretty.clone();
+        self.raw_sync_generation = self.raw_sync_generation.wrapping_add(1);
+        self.raw_sync_task = None;
+        self.replace_tree_document(next, cx);
+        if self.raw_text(cx) != text {
+            self.raw_editor
+                .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        }
     }
 
     pub fn refresh_key_sort(&mut self, cx: &mut Context<Self>) {
@@ -517,7 +546,14 @@ impl DocView {
         cx: &mut Context<Self>,
     ) -> Result<LoadedDocument, AppError> {
         let text = self.raw_text(cx);
-        let parsed = (text == self.doc.pretty).then(|| self.doc.clone());
+        let expand = crate::views::settings::settings(cx).expand_json_strings;
+        let parsed = if text == self.doc.pretty {
+            Some(self.doc.with_string_expansion(expand))
+        } else {
+            Some(Arc::new(
+                JsonTree::parse_with_options(&text, expand).map_err(AppError::parse)?,
+            ))
+        };
         document::from_history(
             self.kind,
             self.title.to_string(),
@@ -645,6 +681,30 @@ impl DocView {
     }
 
     fn toggle_raw_editable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.raw_editable {
+            let expand = crate::views::settings::settings(cx).expand_json_strings;
+            let text = self.raw_text(cx);
+            let next = if text == self.doc.pretty {
+                self.doc.with_string_expansion(expand)
+            } else {
+                match JsonTree::parse_with_options(&text, expand) {
+                    Ok(next) => Arc::new(next),
+                    Err(err) => {
+                        self.say(false, AppError::parse(err).message(), cx);
+                        return;
+                    }
+                }
+            };
+            let mode_changed = self.doc.expand_json_strings != expand;
+            self.raw_sync_generation = self.raw_sync_generation.wrapping_add(1);
+            self.raw_sync_task = None;
+            self.replace_tree_document(next, cx);
+            let text = self.doc.pretty.clone();
+            if (self.doc.decoded_strings > 0 || mode_changed) && self.raw_text(cx) != text {
+                self.raw_editor
+                    .update(cx, |editor, cx| editor.set_value(text, window, cx));
+            }
+        }
         self.raw_editable = !self.raw_editable;
         let readonly = !self.raw_editable;
         self.raw_editor
@@ -736,6 +796,7 @@ fn value_to_copy(doc: &JsonTree, id: usize) -> String {
 
 impl gpui_kit::Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_string_expansion(window, cx);
         let theme = cx.theme();
         v_flex()
             .size_full()

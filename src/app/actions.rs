@@ -67,6 +67,36 @@ pub(crate) fn refresh_doc_view_key_sort(cx: &mut gpui_kit::App) {
     }
 }
 
+/// Apply the global parsing policy to every open doc/diff, including inactive
+/// tabs and other windows. Defer window access out of the settings callback.
+pub(crate) fn refresh_json_string_expansion(cx: &mut gpui_kit::App) {
+    let Some(windows) = cx.try_global::<AppWindows>() else {
+        return;
+    };
+    let apps = windows.0.clone();
+    for (handle, app) in apps {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = app.update(cx, |app, cx| {
+                    for tab in &app.tabs {
+                        match tab {
+                            TabPage::Doc(doc) => doc.update(cx, |_, cx| {
+                                cx.defer_in(window, |doc, window, cx| {
+                                    doc.refresh_string_expansion(window, cx)
+                                });
+                            }),
+                            TabPage::Diff(diff) => {
+                                diff.update(cx, |diff, cx| diff.refresh_string_expansion(cx))
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            });
+        });
+    }
+}
+
 /// Run an app-level action against the focused window's HJsonApp view.
 fn window_action<A: Action>(
     cx: &mut gpui_kit::App,

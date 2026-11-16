@@ -119,7 +119,9 @@ fn from_parts(
     }
     let parsed = match parsed {
         Some(parsed) => parsed,
-        None => Arc::new(JsonTree::parse(&text).map_err(AppError::parse)?),
+        // Loading keeps the literal tree; the owning view applies the global
+        // policy. No decoding work is spent when that policy is disabled.
+        None => Arc::new(JsonTree::parse_literal(&text).map_err(AppError::parse)?),
     };
     Ok(LoadedDocument {
         kind,
@@ -140,6 +142,36 @@ fn import_title(url: &str, custom: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_text_sources_preserve_literal_input_until_view_policy_is_applied() {
+        let text = r#"{"payload":"{\"a\":1}"}"#;
+        let expected = serde_json::json!({"payload":{"a":1}});
+        for kind in [
+            SourceKind::Manual,
+            SourceKind::Clipboard,
+            SourceKind::File,
+            SourceKind::Url,
+        ] {
+            let doc = from_text(kind, "encoded", text, None).unwrap();
+            assert_eq!(doc.text, text);
+            assert!(doc.parsed.root["payload"].is_string());
+            assert_eq!(doc.parsed.decoded_strings, 0);
+            let expanded = doc.parsed.with_string_expansion(true);
+            assert_eq!(expanded.root, expected);
+            assert_eq!(expanded.with_string_expansion(false).root, doc.parsed.root);
+            let restored =
+                from_history(kind, "encoded", text, None, Some(doc.parsed.clone())).unwrap();
+            assert!(Arc::ptr_eq(&doc.parsed, &restored.parsed));
+        }
+        for doc in [
+            from_manual(text).unwrap(),
+            from_clipboard(text).unwrap(),
+            from_history(SourceKind::Manual, "encoded", text, None, None).unwrap(),
+        ] {
+            assert_eq!(doc.parsed.with_string_expansion(true).root, expected);
+        }
+    }
 
     #[test]
     fn url_title_prefers_non_empty_custom_title() {
