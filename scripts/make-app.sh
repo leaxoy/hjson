@@ -87,6 +87,17 @@ cat > "$DIST_APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>10.15</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>JSON Document</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key><array><string>public.json</string></array>
+      <key>CFBundleTypeExtensions</key><array><string>json</string></array>
+      <key>CFBundleTypeMIMETypes</key><array><string>application/json</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

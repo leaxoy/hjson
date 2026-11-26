@@ -46,7 +46,7 @@ cat > "$STAGE/usr/share/applications/com.hjson.viewer.desktop" <<DESKTOP
 Type=Application
 Name=HJson
 Comment=JSON viewer and structure comparer
-Exec=hjson %f
+Exec=hjson %F
 Icon=hjson
 Terminal=false
 Categories=Development;Utility;

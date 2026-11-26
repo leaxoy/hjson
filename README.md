@@ -13,6 +13,8 @@ All parsing, formatting, comparison, and history state stay local to the app.
 
 - Open JSON from clipboard, files, URLs, manual input, sample data, or prior
   session imports.
+- Open `.json` files from your file manager, including when HJson is already
+  running on macOS. Multiple files open in separate tabs.
 - View a document as formatted text, a structural tree, or both side by side.
 - Use the global **Settings → JSON Preview → Recursively expand JSON strings**
   switch (enabled by default) to decode valid JSON inside root or nested strings
@@ -36,6 +38,23 @@ All parsing, formatting, comparison, and history state stay local to the app.
 - Tune language, appearance, JSON font, wrapping, line numbers, key sorting,
   and syntax themes in settings.
 - Ship installable artifacts for macOS, Linux, and Windows from tagged releases.
+
+## Open JSON by double-clicking
+
+Set HJson as the default application for `.json` once:
+
+- **macOS:** install the packaged `HJson.app` in Applications. Select a `.json`
+  file in Finder, choose **Get Info → Open with → HJson → Change All**.
+- **Linux:** install the `.deb`, then choose HJson as the default application
+  for JSON in your file manager's file properties.
+- **Windows:** extract the zip to a permanent folder. Right-click a `.json`
+  file, choose **Open with → Choose another app**, select `hjson.exe`, and
+  choose to always use it for `.json` files.
+
+The macOS and Linux packages advertise only JSON. Other file types keep their
+existing double-click behavior, including `.jsonc` and `.json5`.
+You can also pass one or more `.json` paths directly, for example
+`cargo run -- "path to/data.json" other.json`.
 
 ## Keyboard Shortcuts
 

@@ -9,6 +9,7 @@ mod history;
 mod home;
 pub mod menu;
 mod render;
+mod system_open;
 mod tabs;
 
 pub use actions::{
@@ -20,6 +21,7 @@ pub(crate) use actions::{refresh_doc_view_key_sort, refresh_json_string_expansio
 pub use documents::DocEntry;
 pub use history::human_size;
 pub use home::HomeView;
+pub use system_open::{open_external_paths, open_external_urls, open_window};
 
 /// The live app view of every open window.
 ///

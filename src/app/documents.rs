@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use gpui_kit::{AppContext as _, Context, Entity, SharedString, Window};
 
@@ -168,6 +168,35 @@ impl HJsonApp {
     /// Open a file picked from disk.
     pub fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_load((), LoadMethod::PickFile, window, cx);
+    }
+
+    /// Read OS-provided files off the UI thread and preserve their input order.
+    pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let read = cx.background_spawn(async move {
+            paths
+                .into_iter()
+                .map(|path| {
+                    crate::document::from_file(path.clone()).map_err(|error| {
+                        AppError::plain(format!("{}: {}", path.display(), error.message()))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let results = read.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                for result in results {
+                    match result {
+                        Ok(document) => {
+                            this.load_succeeded((), LoadMethod::PickFile, document, window, cx)
+                        }
+                        Err(error) => this.load_failed((), error, cx),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn open_url_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
